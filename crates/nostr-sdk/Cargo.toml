@@ -26,6 +26,7 @@ nip19 = ["nostr/nip19"]
 nip46 = ["nostr/nip46"]
 
 [dependencies]
+async-stream = "0.3"
 log = "0.4"
 nostr = { version = "0.20", path = "../nostr", default-features = false }
 nostr-sdk-net = { version = "0.20", path = "../nostr-sdk-net" }

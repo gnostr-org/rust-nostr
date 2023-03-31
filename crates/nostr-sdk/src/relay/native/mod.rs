@@ -4,13 +4,15 @@
 //! Relay
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_stream::try_stream;
 #[cfg(feature = "nip11")]
 use nostr::nips::nip11::RelayInformationDocument;
 use nostr::{ClientMessage, Event, Filter, RelayMessage, SubscriptionId, Url};
-use nostr_sdk_net::futures_util::{Future, SinkExt, StreamExt};
+use nostr_sdk_net::futures_util::{Future, SinkExt, Stream, StreamExt};
 use nostr_sdk_net::{self as net, WsMessage};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -529,9 +531,9 @@ impl Relay {
         };
 
         if let Some(timeout) = timeout {
-            if tokio::time::timeout(timeout, recv).await.is_err() {
-                return Err(Error::Timeout);
-            }
+            tokio::time::timeout(timeout, recv)
+                .await
+                .map_err(|_| Error::Timeout)?;
         } else {
             recv.await;
         }
@@ -555,6 +557,53 @@ impl Relay {
         })
         .await?;
         Ok(events.into_inner())
+    }
+
+    /// Stream events of filters
+    pub async fn stream_events_of(
+        &self,
+        filters: Vec<Filter>,
+        timeout: Option<Duration>,
+    ) -> Result<Pin<Box<impl Stream<Item = Result<Event, Error>> + '_>>, Error> {
+        if !self.opts.read() {
+            return Err(Error::ReadDisabled);
+        }
+
+        let id = SubscriptionId::generate();
+
+        self.send_msg(ClientMessage::new_req(id.clone(), filters), false)
+            .await?;
+
+        let timeout = timeout.unwrap_or_else(|| Duration::from_secs(u64::MAX));
+
+        let s = try_stream! {
+            let mut notifications = self.notification_sender.subscribe();
+            while let Ok(notification) = tokio::time::timeout(timeout, notifications.recv()).await.map_err(|_| Error::Timeout)? {
+                if let RelayPoolNotification::Message(_, msg) = notification {
+                    match msg {
+                        RelayMessage::Event {
+                            subscription_id,
+                            event,
+                        } => {
+                            if subscription_id.eq(&id) {
+                                yield *event;
+                            }
+                        }
+                        RelayMessage::EndOfStoredEvents(subscription_id) => {
+                            if subscription_id.eq(&id) {
+                                break;
+                            }
+                        }
+                        _ => log::debug!("Receive unhandled message {msg:?} on get_events_of"),
+                    };
+                }
+            }
+
+            // Unsubscribe
+            self.send_msg(ClientMessage::close(id), false).await?;
+        };
+
+        Ok(Box::pin(s))
     }
 
     /// Request events of filter. All events will be sent to notification listener

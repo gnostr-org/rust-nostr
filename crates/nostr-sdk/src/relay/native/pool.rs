@@ -388,6 +388,33 @@ impl RelayPool {
         Ok(events.lock_owned().await.clone())
     }
 
+    /* /// Stream events of filters
+    pub async fn stream_events_of(
+        &self,
+        filters: Vec<Filter>,
+        timeout: Option<Duration>,
+    ) -> Result<impl Stream<Item = Result<Event, Error>> + '_, Error> {    
+        
+
+        Ok(try_stream! {
+            let mut streams = Vec::new();
+
+            let relays = self.relays().await;
+            for (_, relay) in relays.into_iter() {
+                let stream = relay.stream_events_of(filters.clone(), timeout).await?;
+                //pin_mut!(stream);
+                streams.push(stream);
+            }
+
+            let mut s = select_all(streams);
+
+            while let Some(res) = s.next().await {
+                let event = res?;
+                yield event;
+            }
+        })
+    } */
+
     /// Request events of filter. All events will be sent to notification listener
     pub async fn req_events_of(&self, filters: Vec<Filter>, timeout: Option<Duration>) {
         let relays = self.relays().await;
