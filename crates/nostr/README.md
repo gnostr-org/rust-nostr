@@ -18,11 +18,9 @@ If you're writing a typical Nostr client or bot, you may be interested in [nostr
 
 ```toml
 [dependencies]
-nostr = "0.22"
+nostr = "=0.22.0-bitcoin-v0.29"
 tungstenite = { version = "0.19", features = ["rustls-tls-webpki-roots"]}
 ```
-
-NOTE: if you are using `bitcoin` v0.29, use version `nostr = "=0.22.0-bitcoin-v0.29"` insead.
 
 ```rust,no_run
 use nostr::prelude::*;
