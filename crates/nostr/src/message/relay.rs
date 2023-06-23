@@ -35,6 +35,7 @@ pub enum RelayMessage {
         subscription_id: SubscriptionId,
         count: usize,
     },
+    Pong(u64),
     Empty,
 }
 
@@ -112,6 +113,11 @@ impl RelayMessage {
         }
     }
 
+    /// Create new `PONG` message
+    pub fn new_pong(nonce: u64) -> Self {
+        Self::Pong(nonce)
+    }
+
     fn as_value(&self) -> Value {
         match self {
             Self::Event {
@@ -132,6 +138,7 @@ impl RelayMessage {
                 subscription_id,
                 count,
             } => json!(["COUNT", subscription_id, { "count": count }]),
+            Self::Pong(nonce) => json!(["PONG", nonce]),
             Self::Empty => Value::Null,
         }
     }
@@ -232,6 +239,17 @@ impl RelayMessage {
             let count: usize = serde_json::from_value(count)?;
 
             return Ok(Self::new_count(subscription_id, count));
+        }
+
+        // ["PONG", <nonce>]
+        if v[0] == "PONG" {
+            if v_len != 2 {
+                return Err(MessageHandleError::InvalidMessageFormat);
+            }
+            let nonce: u64 = v[1]
+                .as_u64()
+                .ok_or(MessageHandleError::InvalidMessageFormat)?;
+            return Ok(Self::new_pong(nonce));
         }
 
         Err(MessageHandleError::InvalidMessageFormat)
@@ -375,6 +393,14 @@ mod tests {
         assert!(
             RelayMessage::from_json(r#"["OK", "b1a649ebe8b435ec71d3784793f3bbf4b93e64e17568a741aecd4c7ddeafce30", hello, 404]"#).is_err()
         );
+    }
+
+    #[test]
+    fn test_pong_msg() {
+        let msg = RelayMessage::new_pong(123456);
+        let json = r##"["PONG",123456]"##;
+        assert_eq!(msg.as_json(), json);
+        assert_eq!(msg, RelayMessage::from_json(json).unwrap())
     }
 
     #[test]

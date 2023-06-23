@@ -36,6 +36,8 @@ pub enum ClientMessage {
     Close(SubscriptionId),
     /// Auth
     Auth(Box<Event>),
+    /// Ping
+    Ping(u64),
 }
 
 impl Serialize for ClientMessage {
@@ -90,6 +92,11 @@ impl ClientMessage {
         Self::Auth(Box::new(event))
     }
 
+    /// Create new `PING` message
+    pub fn new_ping(nonce: u64) -> Self {
+        Self::Ping(nonce)
+    }
+
     /// Serialize as [`Value`]
     pub fn as_value(&self) -> Value {
         match self {
@@ -126,6 +133,7 @@ impl ClientMessage {
             }
             Self::Close(subscription_id) => json!(["CLOSE", subscription_id]),
             Self::Auth(event) => json!(["AUTH", event]),
+            Self::Ping(nonce) => json!(["PING", nonce]),
         }
     }
 
@@ -205,6 +213,17 @@ impl ClientMessage {
             }
             let event = Event::from_json(v[1].to_string())?;
             return Ok(Self::new_auth(event));
+        }
+
+        // ["PING", <nonce>]
+        if v[0] == "PING" {
+            if v_len != 2 {
+                return Err(MessageHandleError::InvalidMessageFormat);
+            }
+            let nonce: u64 = v[1]
+                .as_u64()
+                .ok_or(MessageHandleError::InvalidMessageFormat)?;
+            return Ok(Self::new_ping(nonce));
         }
 
         Err(MessageHandleError::InvalidMessageFormat)
@@ -294,5 +313,13 @@ mod tests {
         let msg = ClientMessage::from_value(req.clone()).unwrap();
 
         assert_eq!(msg.as_value(), req)
+    }
+
+    #[test]
+    fn test_ping_msg() {
+        let msg = ClientMessage::new_ping(123456);
+        let json = r##"["PING",123456]"##;
+        assert_eq!(msg.as_json(), json);
+        assert_eq!(msg, ClientMessage::from_json(json).unwrap())
     }
 }
