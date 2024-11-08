@@ -1,32 +1,25 @@
 #!/bin/bash
 
-# Needed to exit from script on error
-set -e
+set -euo pipefail
 
-# Check UniFFI bindings
+# Check bindings
 buildargs=(
-    "-p nostr-ffi"
     "-p nostr-sdk-ffi"
+    "-p nostr-sdk-flutter"
+    "-p nostr-sdk-js --target wasm32-unknown-unknown"
 )
 
 for arg in "${buildargs[@]}"; do
     echo  "Checking '$arg'"
+
     cargo build $arg
+
+    if [[ $arg != *"--target wasm32-unknown-unknown"* ]];
+    then
+        cargo test $arg
+    fi
+
     cargo clippy $arg -- -D warnings
-    echo
-done
 
-# Check JS bindings
-buildargs=(
-    "nostr-js"
-    "nostr-sdk-js"
-)
-
-for arg in "${buildargs[@]}"; do
-    echo  "Checking '$arg'"
-    pushd "bindings/$arg"
-    cargo build
-    cargo clippy -- -D warnings
-    popd
     echo
 done

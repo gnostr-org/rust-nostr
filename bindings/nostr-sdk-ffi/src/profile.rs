@@ -5,11 +5,13 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use nostr_ffi::{Metadata, PublicKey};
 use nostr_sdk::database;
 use uniffi::Object;
 
-#[derive(Object)]
+use crate::protocol::{Metadata, PublicKey};
+
+#[derive(Debug, PartialEq, Eq, Hash, Object)]
+#[uniffi::export(Debug, Eq, Hash)]
 pub struct Profile {
     inner: database::Profile,
 }

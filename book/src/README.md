@@ -1,4 +1,4 @@
-<div align="center">
+<div style="text-align: center;">
     <h1>
         <code>rust-nostr</code>
     </h1>
@@ -30,9 +30,15 @@
 
 ## Libraries
 
-* [Nostr](./nostr/01-index.md): Implementation of the `nostr` protocol
+* [Nostr](./nostr/index.md): Implementation of the `nostr` protocol
 * [Nostr Database](): Databases abstraction, indexes and in-memory database implementation
-* [Nostr SDK](./nostr-sdk/01-index.md): High level nostr client library
+* [Nostr SDK](./nostr-sdk/index.md): High level nostr client library
+
+## Communication
+
+* Nostr community: <nostr:naddr1qvzqqqyx7cpzq6xcz9jerqgqkldy8lpg7lglcyj4g3nwzy2cs6u70wejdaj7csnjqyg8wumn8ghj7mn0wd68ytnddakj7qgawaehxw309ahx7um5wghx6at5d9h8jampd3kx2apwvdhk6tcqpfe82um594hx7um5wguyvg2q>
+* Nostr public channel: <nostr:nevent1qvzqqqqq9qpzq6xcz9jerqgqkldy8lpg7lglcyj4g3nwzy2cs6u70wejdaj7csnjqyg8wumn8ghj7mn0wd68ytnddakj7qg4waehxw309ahx7um5wghx77r5wghxgetk9uqzpw86ja20989g7vupv08fq78z03aevh5kheqr6al07v7sslzqxmhhxau0ah>
+* Matrix space with some rooms at [#rustnostr:matrix.org](https://matrix.to/#/#rustnostr:matrix.org).
 
 ## State
 

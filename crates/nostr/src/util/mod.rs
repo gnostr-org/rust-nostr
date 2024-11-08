@@ -6,11 +6,13 @@
 
 use alloc::string::String;
 
+#[cfg(feature = "std")]
+use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::{ecdh, Parity, PublicKey as NormalizedPublicKey};
 #[cfg(feature = "std")]
-use bitcoin::secp256k1::{rand, All, Secp256k1};
+use bitcoin::secp256k1::{All, Secp256k1};
 #[cfg(feature = "std")]
-use once_cell::sync::Lazy;
+use once_cell::sync::Lazy; // TODO: use `std::sync::LazyLock` when MSRV >= 1.80.0
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -38,8 +40,7 @@ pub fn generate_shared_key(secret_key: &SecretKey, public_key: &PublicKey) -> [u
 #[cfg(feature = "std")]
 pub static SECP256K1: Lazy<Secp256k1<All>> = Lazy::new(|| {
     let mut ctx = Secp256k1::new();
-    let mut rng = rand::thread_rng();
-    ctx.randomize(&mut rng);
+    ctx.randomize(&mut OsRng);
     ctx
 });
 
@@ -52,6 +53,7 @@ where
     type Err;
 
     /// Deserialize JSON
+    #[inline]
     fn from_json<T>(json: T) -> Result<Self, Self::Err>
     where
         T: AsRef<[u8]>,
@@ -59,10 +61,32 @@ where
         Ok(serde_json::from_slice(json.as_ref())?)
     }
 
-    /// Serialize to JSON string
+    /// Serialize as JSON string
+    ///
+    /// This method could panic! Use `try_as_json` for error propagation.
+    #[inline]
     fn as_json(&self) -> String {
-        // TODO: remove unwrap
         serde_json::to_string(self).unwrap()
+    }
+
+    /// Serialize as JSON string
+    #[inline]
+    fn try_as_json(&self) -> Result<String, Self::Err> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// Serialize as pretty JSON string
+    ///
+    /// This method could panic! Use `try_as_pretty_json` for error propagation.
+    #[inline]
+    fn as_pretty_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap()
+    }
+
+    /// Serialize as pretty JSON string
+    #[inline]
+    fn try_as_pretty_json(&self) -> Result<String, Self::Err> {
+        Ok(serde_json::to_string_pretty(self)?)
     }
 }
 

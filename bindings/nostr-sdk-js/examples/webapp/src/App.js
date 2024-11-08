@@ -27,7 +27,7 @@ class App extends Component {
       // Get NIP07 signer and compose Client with NostrSigner
       let nip07_signer = new Nip07Signer();
       let signer = NostrSigner.nip07(nip07_signer);
-      let zapper = NostrZapper.webln();
+      let zapper = await NostrZapper.webln();
       let db = await NostrDatabase.indexeddb("nostr-sdk-webapp-example");
       let client = new ClientBuilder().signer(signer).zapper(zapper).database(db).build();
 
@@ -52,9 +52,22 @@ class App extends Component {
     try {
       let filter = new Filter().author(this.state.public_key);
       let opts = new NegentropyOptions();
-      await this.state.client.reconcile(filter, opts);
+      await this.state.client.sync(filter, opts);
     } catch (error) {
         console.log(error) 
+    }
+  }
+
+  handleQueryDatabase = async () => {
+    try {
+      let filter = new Filter().author(this.state.public_key);
+      let database = this.state.client.database;
+      console.time("query");
+      let events = await database.query([filter]);
+      console.timeEnd("query");
+      console.log("Got", events.length, "events");
+    } catch (error) {
+      console.log(error)
     }
   }
 
@@ -107,6 +120,9 @@ class App extends Component {
             <p>Public key: {this.state.public_key.toBech32()}</p>
             <button className="btn btn-primary" onClick={this.handleReconcile}>
               Negentropy reconciliation
+            </button>
+            <button className="btn btn-primary" onClick={this.handleQueryDatabase}>
+              Query local database
             </button>
             <button className="btn btn-primary" onClick={this.handlePublishTextNote}>
               Publish text note

@@ -2,10 +2,12 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
+use std::time::Duration;
+
 use nostr::prelude::*;
 use nostr::{EventBuilder, Filter, Keys, Kind, Metadata, Tag};
 use nostr_database::memory::MemoryDatabase;
-use nostr_database::{MemoryDatabaseOptions, NostrDatabase, Order};
+use nostr_database::{MemoryDatabaseOptions, NostrDatabase};
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
@@ -24,28 +26,32 @@ async fn main() {
             .unwrap();
     let keys_b = Keys::new(secret_key);
 
-    let mut opts = MemoryDatabaseOptions::default();
-    opts.events = true;
+    let opts = MemoryDatabaseOptions {
+        events: true,
+        ..Default::default()
+    };
     let database = MemoryDatabase::with_opts(opts);
 
     for i in 0..100_000 {
         let event = EventBuilder::text_note(format!("Event #{i}"), [])
-            .to_event(&keys_a)
+            .sign_with_keys(&keys_a)
             .unwrap();
         database.save_event(&event).await.unwrap();
 
         let event = EventBuilder::text_note(
             format!("Reply to event #{i}"),
-            [Tag::event(event.id()), Tag::public_key(event.author())],
+            [Tag::event(event.id), Tag::public_key(event.pubkey)],
         )
-        .to_event(&keys_b)
+        .sign_with_keys(&keys_b)
         .unwrap();
         database.save_event(&event).await.unwrap();
     }
 
     for i in 0..10 {
         let metadata = Metadata::new().name(format!("Name #{i}"));
-        let event = EventBuilder::metadata(&metadata).to_event(&keys_a).unwrap();
+        let event = EventBuilder::metadata(&metadata)
+            .sign_with_keys(&keys_a)
+            .unwrap();
         database.save_event(&event).await.unwrap();
     }
 
@@ -53,26 +59,25 @@ async fn main() {
         let event = EventBuilder::new(
             Kind::Custom(123),
             "Custom with d tag",
-            [Tag::Identifier(format!("myid{i}"))],
+            [Tag::identifier(format!("myid{i}"))],
         )
-        .to_event(&keys_a)
+        .sign_with_keys(&keys_a)
         .unwrap();
         database.save_event(&event).await.unwrap();
     }
 
     let events = database
-        .query(
-            vec![Filter::new()
-                .kinds(vec![Kind::Metadata, Kind::Custom(123), Kind::TextNote])
-                .limit(20)
-                //.kind(Kind::Custom(123))
-                //.identifier("myid5000")
-                .author(keys_a.public_key())],
-            Order::Desc,
-        )
+        .query(vec![Filter::new()
+            .kinds(vec![Kind::Metadata, Kind::Custom(123), Kind::TextNote])
+            .limit(20)
+            //.kind(Kind::Custom(123))
+            //.identifier("myid5000")
+            .author(keys_a.public_key())])
         .await
         .unwrap();
     println!("Got {} events", events.len());
 
-    loop {}
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
 }

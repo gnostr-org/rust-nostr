@@ -7,20 +7,26 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rustdoc::bare_urls)]
-#![allow(unknown_lints)]
+#![warn(clippy::large_futures)]
+#![allow(unknown_lints)] // TODO: remove when MSRV >= 1.72.0, required for `clippy::arc_with_non_send_sync`
 #![allow(clippy::arc_with_non_send_sync)]
+#![allow(clippy::mutable_key_type)] // TODO: remove when possible. Needed to suppress false positive for `BTreeSet<Event>`
+
+pub use async_wsocket::ConnectionMode;
 
 pub mod pool;
 pub mod prelude;
 pub mod relay;
 
 pub use self::pool::options::RelayPoolOptions;
-pub use self::pool::{RelayPool, RelayPoolNotification};
+pub use self::pool::{Output, RelayPool, RelayPoolNotification};
 pub use self::relay::flags::{AtomicRelayServiceFlags, RelayServiceFlags};
 pub use self::relay::limits::RelayLimits;
 pub use self::relay::options::{
-    FilterOptions, NegentropyDirection, NegentropyOptions, RelayOptions, RelaySendOptions,
-    SubscribeAutoCloseOptions, SubscribeOptions,
+    FilterOptions, RelayOptions, SubscribeAutoCloseOptions, SubscribeOptions, SyncDirection,
+    SyncOptions,
 };
 pub use self::relay::stats::RelayConnectionStats;
-pub use self::relay::{Relay, RelayNotification, RelayStatus};
+pub use self::relay::{
+    Reconciliation, Relay, RelayFiltering, RelayFilteringMode, RelayNotification, RelayStatus,
+};

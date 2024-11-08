@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP01
+//! NIP01: Basic protocol flow description
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/01.md>
 
@@ -13,11 +13,13 @@ use core::fmt;
 use core::num::ParseIntError;
 use core::str::FromStr;
 
+use super::nip19::FromBech32;
+use super::nip21::NostrURI;
 use crate::event::id;
-use crate::{key, Filter, Kind, PublicKey, Tag, UncheckedUrl};
+use crate::{key, Filter, Kind, PublicKey, Tag, TagStandard, UncheckedUrl};
 
 /// Raw Event error
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     /// Keys error
     Keys(key::Error),
@@ -79,12 +81,59 @@ pub struct Coordinate {
 
 impl Coordinate {
     /// Create new event coordinate
+    #[inline]
     pub fn new(kind: Kind, public_key: PublicKey) -> Self {
         Self {
             kind,
             public_key,
             identifier: String::new(),
             relays: Vec::new(),
+        }
+    }
+
+    /// Parse coordinate from `<kind>:<pubkey>:[<d-tag>]` format, `bech32` or [NIP21](https://github.com/nostr-protocol/nips/blob/master/21.md) uri
+    pub fn parse<S>(coordinate: S) -> Result<Self, Error>
+    where
+        S: AsRef<str>,
+    {
+        let coordinate: &str = coordinate.as_ref();
+
+        // Try from hex
+        if let Ok(coordinate) = Self::from_kpi_format(coordinate) {
+            return Ok(coordinate);
+        }
+
+        // Try from bech32
+        if let Ok(coordinate) = Self::from_bech32(coordinate) {
+            return Ok(coordinate);
+        }
+
+        // Try from NIP21 URI
+        if let Ok(coordinate) = Self::from_nostr_uri(coordinate) {
+            return Ok(coordinate);
+        }
+
+        Err(Error::InvalidCoordinate)
+    }
+
+    /// Try to parse from `<kind>:<pubkey>:[<d-tag>]` format
+    pub fn from_kpi_format<S>(coordinate: S) -> Result<Self, Error>
+    where
+        S: AsRef<str>,
+    {
+        let coordinate: &str = coordinate.as_ref();
+        let mut kpi = coordinate.split(':');
+        if let (Some(kind_str), Some(public_key_str), Some(identifier)) =
+            (kpi.next(), kpi.next(), kpi.next())
+        {
+            Ok(Self {
+                kind: Kind::from_str(kind_str)?,
+                public_key: PublicKey::from_hex(public_key_str)?,
+                identifier: identifier.to_owned(),
+                relays: Vec::new(),
+            })
+        } else {
+            Err(Error::InvalidCoordinate)
         }
     }
 
@@ -98,14 +147,20 @@ impl Coordinate {
         self.identifier = identifier.into();
         self
     }
+
+    /// Check if coordinate has identifier
+    #[inline]
+    pub fn has_identifier(&self) -> bool {
+        !self.identifier.is_empty()
+    }
 }
 
 impl From<Coordinate> for Tag {
-    fn from(value: Coordinate) -> Self {
-        Self::A {
-            relay_url: value.relays.first().cloned().map(UncheckedUrl::from),
-            coordinate: value,
-        }
+    fn from(coordinate: Coordinate) -> Self {
+        Self::from_standardized(TagStandard::Coordinate {
+            relay_url: coordinate.relays.first().cloned().map(UncheckedUrl::from),
+            coordinate,
+        })
     }
 }
 
@@ -144,19 +199,53 @@ impl fmt::Display for Coordinate {
 impl FromStr for Coordinate {
     type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut kpi = s.split(':');
-        if let (Some(kind_str), Some(public_key_str), Some(identifier)) =
-            (kpi.next(), kpi.next(), kpi.next())
-        {
-            Ok(Self {
-                kind: Kind::from_str(kind_str)?,
-                public_key: PublicKey::from_str(public_key_str)?,
-                identifier: identifier.to_owned(),
-                relays: Vec::new(),
-            })
-        } else {
-            Err(Error::InvalidCoordinate)
-        }
+    /// Try to parse [Coordinate] from `<kind>:<pubkey>:[<d-tag>]` format, `bech32` or [NIP21](https://github.com/nostr-protocol/nips/blob/master/21.md) uri
+    #[inline]
+    fn from_str(coordinate: &str) -> Result<Self, Self::Err> {
+        Self::parse(coordinate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_coordinate() {
+        let coordinate: &str =
+            "30023:aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4:ipsum";
+        let coordinate: Coordinate = Coordinate::parse(coordinate).unwrap();
+
+        let expected_public_key: PublicKey =
+            PublicKey::from_hex("aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4")
+                .unwrap();
+
+        assert_eq!(coordinate.kind.as_u16(), 30023);
+        assert_eq!(coordinate.public_key, expected_public_key);
+        assert_eq!(coordinate.identifier, "ipsum");
+
+        let coordinate: &str =
+            "20500:aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4:";
+        let coordinate: Coordinate = Coordinate::parse(coordinate).unwrap();
+
+        assert_eq!(coordinate.kind.as_u16(), 20500);
+        assert_eq!(coordinate.public_key, expected_public_key);
+        assert_eq!(coordinate.identifier, "");
+    }
+}
+
+#[cfg(bench)]
+mod benches {
+    use test::{black_box, Bencher};
+
+    use super::*;
+
+    #[bench]
+    pub fn parse_coordinate(bh: &mut Bencher) {
+        let coordinate: &str =
+            "30023:aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4:ipsum";
+        bh.iter(|| {
+            black_box(Coordinate::parse(coordinate)).unwrap();
+        });
     }
 }

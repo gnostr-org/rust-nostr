@@ -5,13 +5,15 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use nostr_js::error::{into_err, Result};
 use tracing::dispatcher::SetGlobalDefaultError;
 use tracing::field::{Field, Visit};
 use tracing::{Level, Subscriber};
 use tracing_subscriber::layer::*;
 use tracing_subscriber::registry::*;
 use wasm_bindgen::prelude::*;
+
+use crate::error::{into_err, Result};
+use crate::JsNostrLibrary;
 
 #[wasm_bindgen(js_name = LogLevel)]
 pub struct JsLogLevel {
@@ -53,7 +55,17 @@ pub fn init_logger(level: JsLogLevel) -> Result<()> {
     let config = WASMLayerConfigBuilder::default()
         .set_max_level(level)
         .build();
-    try_set_as_global_default(config).map_err(into_err)
+    try_set_as_global_default(config).map_err(into_err)?;
+
+    tracing::info!("Wasm logger initialized");
+
+    // Log git hash (defined at compile time)
+    match JsNostrLibrary::new().git_hash_version() {
+        Some(hash) => tracing::info!("Git hash: {hash}"),
+        None => tracing::warn!("Git hash not defined!"),
+    };
+
+    Ok(())
 }
 
 #[wasm_bindgen]

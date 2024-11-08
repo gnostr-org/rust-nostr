@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP06
+//! NIP06: Basic key derivation from mnemonic seed phrase
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/06.md>
 
@@ -12,7 +12,7 @@ use core::fmt;
 use core::str::FromStr;
 
 use bip39::Mnemonic;
-use bitcoin::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
+use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
 use bitcoin::secp256k1::{Secp256k1, Signing};
 use bitcoin::Network;
 
@@ -66,6 +66,7 @@ pub trait FromMnemonic: Sized {
     /// Derive from BIP-39 mnemonics (ENGLISH wordlist).
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/06.md>
+    #[inline]
     #[cfg(feature = "std")]
     fn from_mnemonic<S>(mnemonic: S, passphrase: Option<S>) -> Result<Self, Self::Err>
     where
@@ -77,6 +78,7 @@ pub trait FromMnemonic: Sized {
     /// Derive from BIP-39 mnemonics with **custom account** (ENGLISH wordlist).
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/06.md>
+    #[inline]
     #[cfg(feature = "std")]
     fn from_mnemonic_with_account<S>(
         mnemonic: S,
@@ -92,6 +94,7 @@ pub trait FromMnemonic: Sized {
     /// Derive from BIP-39 mnemonics with **custom** `account`, `type` and/or `index` (ENGLISH wordlist).
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/06.md>
+    #[inline]
     #[cfg(feature = "std")]
     fn from_mnemonic_advanced<S>(
         mnemonic: S,
@@ -147,7 +150,7 @@ impl FromMnemonic for Keys {
             .to_seed_normalized(passphrase.as_ref().map(|s| s.as_ref()).unwrap_or_default());
 
         // Derive BIP32 root key
-        let root_key = ExtendedPrivKey::new_master(Network::Bitcoin, &seed)?;
+        let root_key = Xpriv::new_master(Network::Bitcoin, &seed)?;
 
         // Unwrap idx
         let account: u32 = account.unwrap_or_default();
@@ -191,7 +194,7 @@ mod tests {
             let keys =
                 Keys::from_mnemonic_with_ctx(&secp, mnemonic, None, None, None, None).unwrap();
             assert_eq!(
-                keys.secret_key().unwrap(),
+                keys.secret_key(),
                 &SecretKey::from_str(expected_secret_key).unwrap()
             );
         }

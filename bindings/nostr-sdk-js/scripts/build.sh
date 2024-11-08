@@ -12,19 +12,22 @@
 # Hopefully one day, https://github.com/rustwasm/wasm-pack/issues/1074 will be
 # fixed and this will be unnecessary.
 
-set -e
+set -exuo pipefail
 
-cd $(dirname "$0")/..
+cd "$(dirname "$0")/.."
 
-wasm-pack build --target nodejs --no-pack --scope rust-nostr --weak-refs --out-dir pkg "${WASM_PACK_ARGS[@]}"
+wasm-pack build --target nodejs --no-pack --scope rust-nostr --weak-refs --reference-types --out-dir pkg --release
 
 # Shrinking .wasm Size
 wc -c pkg/nostr_sdk_js_bg.wasm
 
+# Compress
+gzip -c pkg/nostr_sdk_js_bg.wasm > pkg/nostr_sdk_js_bg.wasm.gz
+
 # Convert the Wasm into a JS file that exports the base64'ed Wasm.
 {
   printf 'module.exports = `'
-  base64 < pkg/nostr_sdk_js_bg.wasm
+  base64 < pkg/nostr_sdk_js_bg.wasm.gz
   printf '`;'
 } > pkg/nostr_sdk_js_bg.wasm.js
 

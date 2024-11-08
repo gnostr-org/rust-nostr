@@ -2,22 +2,21 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP05
+//! NIP05: Mapping Nostr keys to DNS-based internet identifiers
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/05.md>
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use core::str::FromStr;
 use std::net::SocketAddr;
 
 #[cfg(not(target_arch = "wasm32"))]
 use reqwest::Proxy;
+use reqwest::{Client, Response};
 use serde_json::Value;
 use url::Url;
 
-use crate::nips::nip19::Nip19Profile;
 use crate::{key, PublicKey};
 
 /// `NIP05` error
@@ -68,169 +67,158 @@ impl From<key::Error> for Error {
     }
 }
 
-fn compose_url<S>(nip05: S) -> Result<(String, String), Error>
-where
-    S: AsRef<str>,
-{
-    let nip05: &str = nip05.as_ref();
-    let data: Vec<&str> = nip05.split('@').collect();
-    if data.len() != 2 {
-        return Err(Error::InvalidFormat);
-    }
-    let name: &str = data[0];
-    let domain: &str = data[1];
-    let url = format!("https://{domain}/.well-known/nostr.json?name={name}");
-    Ok((url, name.to_string()))
+/// NIP05 profile
+///
+/// <https://github.com/nostr-protocol/nips/blob/master/05.md>
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Nip05Profile {
+    /// Public key
+    pub public_key: PublicKey,
+    /// Relays
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/05.md>
+    pub relays: Vec<Url>,
+    /// NIP46 relays
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/46.md>
+    pub nip46: Vec<Url>,
 }
 
-fn get_key_from_json<S>(json: Value, name: S) -> Option<PublicKey>
-where
-    S: AsRef<str>,
-{
-    let name: &str = name.as_ref();
+fn compose_url(nip05: &str) -> Result<(String, &str), Error> {
+    let mut split = nip05.split('@');
+    if let (Some(name), Some(domain)) = (split.next(), split.next()) {
+        let url = format!("https://{domain}/.well-known/nostr.json?name={name}");
+        return Ok((url, name));
+    }
+    Err(Error::InvalidFormat)
+}
+
+#[inline]
+fn get_key_from_json(json: &Value, name: &str) -> Option<PublicKey> {
     json.get("names")
         .and_then(|names| names.get(name))
         .and_then(|value| value.as_str())
-        .and_then(|pubkey| PublicKey::from_str(pubkey).ok())
+        .and_then(|pubkey| PublicKey::from_hex(pubkey).ok())
 }
 
-fn get_relays_from_json(json: Value, pk: PublicKey) -> Vec<Url> {
-    let relays_list: Option<Vec<Url>> = json
-        .get("relays")
-        .and_then(|relays| relays.get(pk.to_string()))
-        .and_then(|value| serde_json::from_value(value.clone()).ok());
-
-    match relays_list {
-        None => vec![],
-        Some(v) => v,
-    }
+#[inline]
+fn get_relays_from_json(json: &Value, pk: &PublicKey) -> Vec<Url> {
+    json.get("relays")
+        .and_then(|relays| relays.get(pk.to_hex()))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
 }
 
-fn verify_json<S>(public_key: PublicKey, json: Value, name: S) -> Result<(), Error>
-where
-    S: AsRef<str>,
-{
+#[inline]
+fn get_nip46_relays_from_json(json: &Value, pk: &PublicKey) -> Vec<Url> {
+    json.get("nip46")
+        .and_then(|relays| relays.get(pk.to_hex()))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn verify_from_json(public_key: &PublicKey, json: &Value, name: &str) -> bool {
     if let Some(pubkey) = get_key_from_json(json, name) {
-        if pubkey == public_key {
-            return Ok(());
+        if &pubkey == public_key {
+            return true;
         }
     }
 
-    Err(Error::ImpossibleToVerify)
+    false
+}
+
+async fn make_req(nip05: &str, _proxy: Option<SocketAddr>) -> Result<(Value, &str), Error> {
+    let (url, name) = compose_url(nip05)?;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let client: Client = {
+        let mut builder = Client::builder();
+        if let Some(proxy) = _proxy {
+            let proxy = format!("socks5h://{proxy}");
+            builder = builder.proxy(Proxy::all(proxy)?);
+        }
+        builder.build()?
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let client: Client = Client::new();
+
+    let res: Response = client.get(url).send().await?;
+    let json: Value = res.json().await?;
+
+    Ok((json, name))
 }
 
 /// Verify NIP05
 ///
 /// **Proxy is ignored for WASM targets!**
+///
+/// <https://github.com/nostr-protocol/nips/blob/master/05.md>
 pub async fn verify<S>(
-    public_key: PublicKey,
+    public_key: &PublicKey,
     nip05: S,
     _proxy: Option<SocketAddr>,
-) -> Result<(), Error>
+) -> Result<bool, Error>
 where
     S: AsRef<str>,
 {
-    use reqwest::Client;
-
-    let (url, name) = compose_url(nip05)?;
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let client: Client = {
-        let mut builder = Client::builder();
-        if let Some(proxy) = _proxy {
-            let proxy = format!("socks5h://{proxy}");
-            builder = builder.proxy(Proxy::all(proxy)?);
-        }
-        builder.build()?
-    };
-
-    #[cfg(target_arch = "wasm32")]
-    let client: Client = Client::new();
-
-    let res = client.get(url).send().await?;
-    let json: Value = serde_json::from_str(&res.text().await?)?;
-    verify_json(public_key, json, name)
+    let (json, name) = make_req(nip05.as_ref(), _proxy).await?;
+    Ok(verify_from_json(public_key, &json, name))
 }
 
-/// Verify NIP05
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(feature = "blocking")]
-pub fn verify_blocking<S>(
-    public_key: PublicKey,
-    nip05: S,
-    proxy: Option<SocketAddr>,
-) -> Result<(), Error>
-where
-    S: AsRef<str>,
-{
-    use reqwest::blocking::Client;
-
-    let (url, name) = compose_url(nip05)?;
-    let mut builder = Client::builder();
-    if let Some(proxy) = proxy {
-        let proxy = format!("socks5h://{proxy}");
-        builder = builder.proxy(Proxy::all(proxy)?);
-    }
-    let client: Client = builder.build()?;
-    let res = client.get(url).send()?;
-    let json: Value = serde_json::from_str(&res.text()?)?;
-    verify_json(public_key, json, name)
-}
-
-/// Get [Nip19Profile] from NIP05 (public key and list of advertised relays)
+/// Get NIP05 profile
 ///
 /// **Proxy is ignored for WASM targets!**
-pub async fn get_profile<S>(nip05: S, _proxy: Option<SocketAddr>) -> Result<Nip19Profile, Error>
+///
+/// <https://github.com/nostr-protocol/nips/blob/master/05.md>
+pub async fn profile<S>(nip05: S, _proxy: Option<SocketAddr>) -> Result<Nip05Profile, Error>
 where
     S: AsRef<str>,
 {
-    use reqwest::Client;
+    let (json, name) = make_req(nip05.as_ref(), _proxy).await?;
 
-    let (url, name) = compose_url(nip05)?;
+    let public_key: PublicKey = get_key_from_json(&json, name).ok_or(Error::ImpossibleToVerify)?;
+    let relays: Vec<Url> = get_relays_from_json(&json, &public_key);
+    let nip46: Vec<Url> = get_nip46_relays_from_json(&json, &public_key);
 
-    #[cfg(not(target_arch = "wasm32"))]
-    let client: Client = {
-        let mut builder = Client::builder();
-        if let Some(proxy) = _proxy {
-            let proxy = format!("socks5h://{proxy}");
-            builder = builder.proxy(Proxy::all(proxy)?);
-        }
-        builder.build()?
-    };
-
-    #[cfg(target_arch = "wasm32")]
-    let client: Client = Client::new();
-
-    let res = client.get(url).send().await?;
-    let json: Value = serde_json::from_str(&res.text().await?)?;
-
-    let public_key = get_key_from_json(json.clone(), name).ok_or(Error::ImpossibleToVerify)?;
-    let relays = get_relays_from_json(json, public_key);
-
-    Ok(Nip19Profile { public_key, relays })
+    Ok(Nip05Profile {
+        public_key,
+        relays,
+        nip46,
+    })
 }
 
-/// Get [Nip19Profile] from NIP05 (public key and list of advertised relays)
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(feature = "blocking")]
-pub fn get_profile_blocking<S>(nip05: S, proxy: Option<SocketAddr>) -> Result<Nip19Profile, Error>
-where
-    S: AsRef<str>,
-{
-    use reqwest::blocking::Client;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let (url, name) = compose_url(nip05)?;
-    let mut builder = Client::builder();
-    if let Some(proxy) = proxy {
-        let proxy = format!("socks5h://{proxy}");
-        builder = builder.proxy(Proxy::all(proxy)?);
+    #[test]
+    fn test_verify_nip05() {
+        // nostr.json
+        let json: &str = r#"{
+            "names": {
+              "yuki": "68d81165918100b7da43fc28f7d1fc12554466e1115886b9e7bb326f65ec4272",
+              "_": "68d81165918100b7da43fc28f7d1fc12554466e1115886b9e7bb326f65ec4272"
+            }
+          }"#;
+        let json: Value = serde_json::from_str(json).unwrap();
+
+        let (url, name) = compose_url("_@yukikishimoto.com").unwrap();
+        assert_eq!(
+            url,
+            "https://yukikishimoto.com/.well-known/nostr.json?name=_"
+        );
+        assert_eq!(name, "_");
+
+        let public_key =
+            PublicKey::from_hex("68d81165918100b7da43fc28f7d1fc12554466e1115886b9e7bb326f65ec4272")
+                .unwrap();
+        assert!(verify_from_json(&public_key, &json, name));
+        assert!(verify_from_json(&public_key, &json, "yuki"));
+
+        let public_key =
+            PublicKey::from_hex("b2d670de53b27691c0c3400225b65c35a26d06093bcc41f48ffc71e0907f9d4a")
+                .unwrap();
+        assert!(!verify_from_json(&public_key, &json, "yuki"));
     }
-    let client: Client = builder.build()?;
-    let res = client.get(url).send()?;
-    let json: Value = serde_json::from_str(&res.text()?)?;
-
-    let public_key = get_key_from_json(json.clone(), name).ok_or(Error::ImpossibleToVerify)?;
-    let relays = get_relays_from_json(json, public_key);
-
-    Ok(Nip19Profile { public_key, relays })
 }

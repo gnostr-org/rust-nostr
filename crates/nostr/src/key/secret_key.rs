@@ -5,7 +5,6 @@
 //! Secret key
 
 use alloc::string::{String, ToString};
-use core::fmt;
 use core::ops::{Deref, DerefMut};
 use core::str::FromStr;
 
@@ -16,6 +15,12 @@ use super::Error;
 use crate::nips::nip19::FromBech32;
 #[cfg(all(feature = "std", feature = "nip49"))]
 use crate::nips::nip49::{self, EncryptedSecretKey, KeySecurity};
+#[cfg(feature = "std")]
+use crate::prelude::rand::rngs::OsRng;
+use crate::prelude::rand::Rng;
+use crate::secp256k1::{Secp256k1, Signing};
+#[cfg(feature = "std")]
+use crate::SECP256K1;
 
 /// Secret key
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,29 +48,32 @@ impl From<secp256k1::SecretKey> for SecretKey {
     }
 }
 
-impl fmt::Display for SecretKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_secret_hex())
-    }
-}
-
 impl SecretKey {
-    /// Try to parse [SecretKey] from `hex` or `bech32`
+    /// Secret Key len
+    pub const LEN: usize = 32;
+
+    /// Parse from `hex` or `bech32`
     pub fn parse<S>(secret_key: S) -> Result<Self, Error>
     where
         S: AsRef<str>,
     {
         let secret_key: &str = secret_key.as_ref();
-        match Self::from_hex(secret_key) {
-            Ok(secret_key) => Ok(secret_key),
-            Err(_) => match Self::from_bech32(secret_key) {
-                Ok(secret_key) => Ok(secret_key),
-                Err(_) => Err(Error::InvalidSecretKey),
-            },
+
+        // Try from hex
+        if let Ok(secret_key) = Self::from_hex(secret_key) {
+            return Ok(secret_key);
         }
+
+        // Try from bech32
+        if let Ok(secret_key) = Self::from_bech32(secret_key) {
+            return Ok(secret_key);
+        }
+
+        Err(Error::InvalidSecretKey)
     }
 
     /// Parse [SecretKey] from `bytes`
+    #[inline]
     pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
         Ok(Self {
             inner: secp256k1::SecretKey::from_slice(slice)?,
@@ -73,6 +81,7 @@ impl SecretKey {
     }
 
     /// Parse [SecretKey] from `hex` string
+    #[inline]
     pub fn from_hex<S>(hex: S) -> Result<Self, Error>
     where
         S: AsRef<str>,
@@ -82,13 +91,49 @@ impl SecretKey {
         })
     }
 
+    /// Generate new random secret key
+    #[inline]
+    #[cfg(feature = "std")]
+    pub fn generate() -> Self {
+        Self::generate_with_rng(&mut OsRng)
+    }
+
+    /// Generate random secret key with custom [`Rng`]
+    #[inline]
+    #[cfg(feature = "std")]
+    pub fn generate_with_rng<R>(rng: &mut R) -> Self
+    where
+        R: Rng + ?Sized,
+    {
+        Self::generate_with_ctx(&SECP256K1, rng)
+    }
+
+    /// Generate random secret key with custom `secp256k1` context and [`Rng`]
+    #[inline]
+    pub fn generate_with_ctx<C, R>(secp: &Secp256k1<C>, rng: &mut R) -> Self
+    where
+        C: Signing,
+        R: Rng + ?Sized,
+    {
+        let (secret_key, _) = secp.generate_keypair(rng);
+        Self { inner: secret_key }
+    }
+
     /// Get secret key as `hex` string
+    #[inline]
     pub fn to_secret_hex(&self) -> String {
         self.inner.display_secret().to_string()
     }
 
     /// Get secret key as `bytes`
-    pub fn to_secret_bytes(&self) -> [u8; 32] {
+    #[inline]
+    pub fn as_secret_bytes(&self) -> &[u8] {
+        self.inner.as_ref()
+    }
+
+    /// Get secret key as `bytes`
+    #[inline]
+    pub fn to_secret_bytes(&self) -> [u8; Self::LEN] {
         self.inner.secret_bytes()
     }
 
@@ -96,6 +141,7 @@ impl SecretKey {
     ///
     /// By default `LOG_N` is set to `16` and [KeySecurity] to `Unknown`.
     /// To use custom values check [EncryptedSecretKey] constructors.
+    #[inline]
     #[cfg(all(feature = "std", feature = "nip49"))]
     pub fn encrypt<S>(&self, password: S) -> Result<EncryptedSecretKey, nip49::Error>
     where
@@ -109,6 +155,7 @@ impl FromStr for SecretKey {
     type Err = Error;
 
     /// Try to parse [SecretKey] from `hex` or `bech32`
+    #[inline]
     fn from_str(secret_key: &str) -> Result<Self, Self::Err> {
         Self::parse(secret_key)
     }
@@ -127,6 +174,5 @@ impl<'de> Deserialize<'de> for SecretKey {
 impl Drop for SecretKey {
     fn drop(&mut self) {
         self.inner.non_secure_erase();
-        tracing::trace!("Secret Key dropped.");
     }
 }

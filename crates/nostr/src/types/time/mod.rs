@@ -4,11 +4,11 @@
 
 //! Time
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::borrow::Cow;
+use alloc::string::ToString;
 use core::fmt;
-use core::ops::{Add, Sub};
-use core::str::FromStr;
+use core::ops::{Add, Range, Sub};
+use core::str::{self, FromStr};
 use core::time::Duration;
 
 #[cfg(feature = "std")]
@@ -21,11 +21,46 @@ pub use self::supplier::TimeSupplier;
 #[cfg(feature = "std")]
 pub use self::supplier::{Instant, SystemTime, UNIX_EPOCH};
 
+// 2000-03-01 (mod 400 year, immediately after feb29)
+const LEAPOCH: i64 = 11017;
+const DAYS_PER_400Y: i64 = 365 * 400 + 97;
+const DAYS_PER_100Y: i64 = 365 * 100 + 24;
+const DAYS_PER_4Y: i64 = 365 * 4 + 1;
+
+const TO_HUMAN_DATE_BUF: [u8; 20] = [
+    b'0', b'0', b'0', b'0', b'-', b'0', b'0', b'-', b'0', b'0', b'T', b'0', b'0', b':', b'0', b'0',
+    b':', b'0', b'0', b'Z',
+];
+
 /// Unix timestamp in seconds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Timestamp(i64);
+pub struct Timestamp(u64);
 
 impl Timestamp {
+    /// Construct from seconds
+    #[inline]
+    pub const fn from_secs(secs: u64) -> Self {
+        Self(secs)
+    }
+
+    /// Compose `0` timestamp
+    #[inline]
+    pub const fn zero() -> Self {
+        Self::from_secs(0)
+    }
+
+    /// The minimum representable timestamp
+    #[inline]
+    pub const fn min() -> Self {
+        Self::from_secs(u64::MIN)
+    }
+
+    /// The maximum representable timestamp
+    #[inline]
+    pub const fn max() -> Self {
+        Self::from_secs(u64::MAX)
+    }
+
     /// Get UNIX timestamp
     #[cfg(feature = "std")]
     pub fn now() -> Self {
@@ -33,7 +68,7 @@ impl Timestamp {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        Self(ts as i64)
+        Self::from_secs(ts)
     }
 
     /// Get UNIX timestamp from a specified [`TimeSupplier`]
@@ -49,70 +84,63 @@ impl Timestamp {
 
     /// Get tweaked UNIX timestamp
     ///
-    /// Remove a random number of seconds from now (max 65535 secs)
+    /// Remove a random number of seconds from now
     #[cfg(feature = "std")]
-    pub fn tweaked() -> Self {
+    pub fn tweaked(range: Range<u64>) -> Self {
         let mut now: Timestamp = Self::now();
-        now.tweak();
+        now.tweak(range);
         now
     }
 
     /// Get tweaked UNIX timestamp
     ///
-    /// Remove a random number of seconds from now (max 65535 secs)
-    pub fn tweaked_with_supplier_and_rng<T, R>(supplier: &T, rng: &mut R) -> Self
+    /// Remove a random number of seconds from now
+    pub fn tweaked_with_supplier_and_rng<T, R>(supplier: &T, rng: &mut R, range: Range<u64>) -> Self
     where
         T: TimeSupplier,
         R: Rng,
     {
         let mut now: Timestamp = Self::now_with_supplier(supplier);
-        now.tweak_with_rng(rng);
+        now.tweak_with_rng(rng, range);
         now
     }
 
-    /// Remove a random number of seconds from [`Timestamp`] (max 65535 secs)
+    /// Remove a random number of seconds from [`Timestamp`]
+    #[inline]
     #[cfg(feature = "std")]
-    pub fn tweak(&mut self) {
-        self.tweak_with_rng(&mut OsRng);
+    pub fn tweak(&mut self, range: Range<u64>) {
+        self.tweak_with_rng(&mut OsRng, range);
     }
 
-    /// Remove a random number of seconds from [`Timestamp`] (max 65535 secs)
-    pub fn tweak_with_rng<R>(&mut self, rng: &mut R)
+    /// Remove a random number of seconds from [`Timestamp`]
+    pub fn tweak_with_rng<R>(&mut self, rng: &mut R, range: Range<u64>)
     where
         R: Rng,
     {
-        let secs: u16 = rng.gen_range(0..=u16::MAX);
-        self.0 -= secs as i64;
+        let secs: u64 = rng.gen_range(range);
+        self.0 = self.0.saturating_sub(secs);
     }
 
     /// Get timestamp as [`u64`]
+    #[inline]
     pub fn as_u64(&self) -> u64 {
-        if self.0 >= 0 {
-            self.0 as u64
-        } else {
-            0
-        }
-    }
-
-    /// Get timestamp as [`i64`]
-    pub fn as_i64(&self) -> i64 {
         self.0
     }
 
+    /// Check if timestamp is `0`
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
     /// Convert [`Timestamp`] to human datetime
-    pub fn to_human_datetime(&self) -> String {
+    pub fn to_human_datetime<'a>(&self) -> Cow<'a, str> {
         let timestamp: u64 = self.as_u64();
 
         if timestamp >= 253_402_300_800 {
             // Year 9999
-            return String::from("Unavailable");
+            return Cow::Borrowed("Unavailable");
         }
-
-        // 2000-03-01 (mod 400 year, immediately after feb29
-        const LEAPOCH: i64 = 11017;
-        const DAYS_PER_400Y: i64 = 365 * 400 + 97;
-        const DAYS_PER_100Y: i64 = 365 * 100 + 24;
-        const DAYS_PER_4Y: i64 = 365 * 4 + 1;
 
         let days = (timestamp / 86400) as i64 - LEAPOCH;
         let secs_of_day = timestamp % 86400;
@@ -162,30 +190,37 @@ impl Timestamp {
             mon + 2
         };
 
-        let mut buf: Vec<char> = "0000-00-00T00:00:00Z".chars().collect();
+        let mut buf: [u8; 20] = TO_HUMAN_DATE_BUF;
 
-        buf[0] = (b'0' + (year / 1000) as u8) as char;
-        buf[1] = (b'0' + (year / 100 % 10) as u8) as char;
-        buf[2] = (b'0' + (year / 10 % 10) as u8) as char;
-        buf[3] = (b'0' + (year % 10) as u8) as char;
-        buf[5] = (b'0' + (mon / 10) as u8) as char;
-        buf[6] = (b'0' + (mon % 10) as u8) as char;
-        buf[8] = (b'0' + (mday / 10) as u8) as char;
-        buf[9] = (b'0' + (mday % 10) as u8) as char;
-        buf[11] = (b'0' + (secs_of_day / 3600 / 10) as u8) as char;
-        buf[12] = (b'0' + (secs_of_day / 3600 % 10) as u8) as char;
-        buf[14] = (b'0' + (secs_of_day / 60 / 10 % 6) as u8) as char;
-        buf[15] = (b'0' + (secs_of_day / 60 % 10) as u8) as char;
-        buf[17] = (b'0' + (secs_of_day / 10 % 6) as u8) as char;
-        buf[18] = (b'0' + (secs_of_day % 10) as u8) as char;
+        buf[0] = b'0' + (year / 1000) as u8;
+        buf[1] = b'0' + (year / 100 % 10) as u8;
+        buf[2] = b'0' + (year / 10 % 10) as u8;
+        buf[3] = b'0' + (year % 10) as u8;
+        buf[5] = b'0' + (mon / 10) as u8;
+        buf[6] = b'0' + (mon % 10) as u8;
+        buf[8] = b'0' + (mday / 10) as u8;
+        buf[9] = b'0' + (mday % 10) as u8;
+        buf[11] = b'0' + (secs_of_day / 3600 / 10) as u8;
+        buf[12] = b'0' + (secs_of_day / 3600 % 10) as u8;
+        buf[14] = b'0' + (secs_of_day / 60 / 10 % 6) as u8;
+        buf[15] = b'0' + (secs_of_day / 60 % 10) as u8;
+        buf[17] = b'0' + (secs_of_day / 10 % 6) as u8;
+        buf[18] = b'0' + (secs_of_day % 10) as u8;
 
-        buf.into_iter().collect::<String>()
+        Cow::Owned(str::from_utf8(&buf).unwrap_or_default().to_string())
+    }
+}
+
+impl Default for Timestamp {
+    #[inline]
+    fn default() -> Self {
+        Self::zero()
     }
 }
 
 impl From<u64> for Timestamp {
-    fn from(timestamp: u64) -> Self {
-        Self(timestamp as i64)
+    fn from(secs: u64) -> Self {
+        Self::from_secs(secs)
     }
 }
 
@@ -194,7 +229,7 @@ impl FromStr for Timestamp {
 
     #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.parse::<i64>()?))
+        Ok(Self::from_secs(s.parse::<u64>()?))
     }
 }
 
@@ -207,14 +242,14 @@ impl fmt::Display for Timestamp {
 impl Add<Timestamp> for Timestamp {
     type Output = Self;
     fn add(self, rhs: Timestamp) -> Self::Output {
-        Self(self.0.saturating_add(rhs.as_i64()))
+        Self::from_secs(self.0.saturating_add(rhs.as_u64()))
     }
 }
 
 impl Sub<Timestamp> for Timestamp {
     type Output = Self;
     fn sub(self, rhs: Timestamp) -> Self::Output {
-        Self(self.0.saturating_sub(rhs.as_i64()))
+        Self::from_secs(self.0.saturating_sub(rhs.as_u64()))
     }
 }
 
@@ -222,7 +257,7 @@ impl Add<Duration> for Timestamp {
     type Output = Self;
 
     fn add(self, rhs: Duration) -> Self::Output {
-        Self(self.0.saturating_add(rhs.as_secs() as i64))
+        Self::from_secs(self.0.saturating_add(rhs.as_secs()))
     }
 }
 
@@ -230,7 +265,7 @@ impl Sub<Duration> for Timestamp {
     type Output = Self;
 
     fn sub(self, rhs: Duration) -> Self::Output {
-        Self(self.0.saturating_sub(rhs.as_secs() as i64))
+        Self::from_secs(self.0.saturating_sub(rhs.as_secs()))
     }
 }
 
@@ -238,7 +273,7 @@ impl Add<u64> for Timestamp {
     type Output = Self;
 
     fn add(self, rhs: u64) -> Self::Output {
-        self.add(rhs as i64)
+        Self::from_secs(self.0.saturating_add(rhs))
     }
 }
 
@@ -246,23 +281,7 @@ impl Sub<u64> for Timestamp {
     type Output = Self;
 
     fn sub(self, rhs: u64) -> Self::Output {
-        self.sub(rhs as i64)
-    }
-}
-
-impl Add<i64> for Timestamp {
-    type Output = Self;
-
-    fn add(self, rhs: i64) -> Self::Output {
-        Self(self.0.saturating_add(rhs))
-    }
-}
-
-impl Sub<i64> for Timestamp {
-    type Output = Self;
-
-    fn sub(self, rhs: i64) -> Self::Output {
-        Self(self.0.saturating_sub(rhs))
+        Self::from_secs(self.0.saturating_sub(rhs))
     }
 }
 
@@ -275,7 +294,22 @@ mod tests {
         let timestamp = Timestamp::from(1682060685);
         assert_eq!(
             timestamp.to_human_datetime(),
-            String::from("2023-04-21T07:04:45Z")
+            Cow::from("2023-04-21T07:04:45Z")
         );
+    }
+}
+
+#[cfg(bench)]
+mod benches {
+    use test::{black_box, Bencher};
+
+    use super::*;
+
+    #[bench]
+    pub fn timestamp_to_human_datetime(bh: &mut Bencher) {
+        let timestamp = Timestamp::from(1682060685);
+        bh.iter(|| {
+            black_box(timestamp.to_human_datetime());
+        });
     }
 }

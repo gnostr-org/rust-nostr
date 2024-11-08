@@ -2,13 +2,7 @@
 	
 ## Description
 
-A high-level, [Nostr](https://github.com/nostr-protocol/nostr) client library.
-
-If you're writing a typical Nostr client or bot, this is likely the crate you need.
-
-However, the crate is designed in a modular way and depends on several other lower-level libraries. If you're attempting something more custom, you might be interested in these:
-
-- [`nostr`](https://www.npmjs.com/package/@rust-nostr/nostr): Implementation of Nostr protocol
+Nostr protocol implementation, Relay, RelayPool, high-level client library, NWC client and more.
 
 This library **should** work on every JavaScript environment (nodejs, web, react native, ...).
 
@@ -39,12 +33,8 @@ async function main() {
 
     // Add relays
     await client.addRelay("wss://relay.damus.io");
-
-    // Add multiple relays at once
-    await client.addRelays([
-        "wss://nostr.oxtr.dev",
-        "wss://relay.nostr.band",
-    ]);
+    await client.addRelay("wss://nos.lol");
+    await client.addRelay("wss://nostr.oxtr.dev");
 
     await client.connect();
 
@@ -60,7 +50,7 @@ async function main() {
     await client.setMetadata(metadata);
 
     // Publish text note
-    await client.publishTextNote("My first text note from Nostr SDK!", []);
+    await client.publishTextNote("My first text note from rust-nostr!", []);
 
     // Compose and publish custom event (automatically signed with `NostrSigner`)
     let builder = new EventBuilder(1111, "My custom event signer with the NostrSigner", []);
@@ -80,14 +70,15 @@ async function main() {
 main();
 ```
 
-More examples can be found at:
-
-* https://github.com/rust-nostr/nostr/tree/master/bindings/nostr-js/examples
-* https://github.com/rust-nostr/nostr/tree/master/bindings/nostr-sdk-js/examples
+More examples can be found [here](https://github.com/rust-nostr/nostr/tree/master/bindings/nostr-sdk-js/examples).
 
 ## Supported NIPs
 
 Look at <https://github.com/rust-nostr/nostr/tree/master/crates/nostr#supported-nips>
+
+## Book
+
+Learn more about `rust-nostr` at <https://rust-nostr.org>.
 
 ## State
 

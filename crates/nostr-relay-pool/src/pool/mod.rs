@@ -9,23 +9,26 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use atomic_destructor::AtomicDestructor;
-use nostr::{
-    ClientMessage, Event, EventId, Filter, RelayMessage, Result, SubscriptionId, Timestamp,
-    TryIntoUrl, Url,
-};
-use nostr_database::{DynNostrDatabase, IntoNostrDatabase, MemoryDatabase};
+use atomic_destructor::{AtomicDestructor, StealthClone};
+use nostr::prelude::*;
+use nostr_database::{DynNostrDatabase, Events, IntoNostrDatabase, MemoryDatabase};
 use tokio::sync::broadcast;
+pub use tokio_stream::wrappers::ReceiverStream;
 
-mod internal;
+mod constants;
+mod error;
+mod inner;
 pub mod options;
+mod output;
 
-pub use self::internal::Error;
-use self::internal::InternalRelayPool;
+pub use self::error::Error;
+use self::inner::InnerRelayPool;
 pub use self::options::RelayPoolOptions;
-use crate::relay::options::{FilterOptions, NegentropyOptions, RelayOptions, RelaySendOptions};
-use crate::relay::{Relay, RelayStatus};
-use crate::SubscribeOptions;
+pub use self::output::Output;
+use crate::relay::flags::FlagCheck;
+use crate::relay::options::{FilterOptions, RelayOptions, SyncOptions};
+use crate::relay::{Relay, RelayFiltering, RelayStatus};
+use crate::{Reconciliation, RelayServiceFlags, SubscribeOptions};
 
 /// Relay Pool Notification
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +56,13 @@ pub enum RelayPoolNotification {
         /// Relay Status
         status: RelayStatus,
     },
-    /// Stop
-    Stop,
+    /// Authenticated to relay
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/42.md>
+    Authenticated {
+        /// Relay url
+        relay_url: Url,
+    },
     /// Shutdown
     Shutdown,
 }
@@ -62,7 +70,7 @@ pub enum RelayPoolNotification {
 /// Relay Pool
 #[derive(Debug, Clone)]
 pub struct RelayPool {
-    inner: AtomicDestructor<InternalRelayPool>,
+    inner: AtomicDestructor<InnerRelayPool>,
 }
 
 impl Default for RelayPool {
@@ -71,50 +79,85 @@ impl Default for RelayPool {
     }
 }
 
+impl StealthClone for RelayPool {
+    #[inline(always)]
+    fn stealth_clone(&self) -> Self {
+        Self {
+            inner: self.inner.stealth_clone(),
+        }
+    }
+}
+
 impl RelayPool {
     /// Create new `RelayPool`
+    #[inline]
     pub fn new(opts: RelayPoolOptions) -> Self {
         Self::with_database(opts, Arc::new(MemoryDatabase::default()))
     }
 
     /// New with database
+    #[inline]
     pub fn with_database<D>(opts: RelayPoolOptions, database: D) -> Self
     where
         D: IntoNostrDatabase,
     {
         Self {
-            inner: AtomicDestructor::new(InternalRelayPool::with_database(opts, database)),
+            inner: AtomicDestructor::new(InnerRelayPool::with_database(opts, database)),
         }
     }
 
-    /// Stop
-    ///
-    /// Call `connect` to re-start relays connections
-    pub async fn stop(&self) -> Result<(), Error> {
-        self.inner.stop().await
-    }
-
     /// Completely shutdown pool
-    pub async fn shutdown(self) -> Result<(), Error> {
+    #[inline]
+    pub async fn shutdown(&self) -> Result<(), Error> {
         self.inner.shutdown().await
     }
 
     /// Get new **pool** notification listener
+    ///
+    /// <div class="warning">When you call this method, you subscribe to the notifications channel from that precise moment. Anything received by relay/s before that moment is not included in the channel!</div>
+    #[inline]
     pub fn notifications(&self) -> broadcast::Receiver<RelayPoolNotification> {
         self.inner.notifications()
     }
 
     /// Get database
-    pub fn database(&self) -> Arc<DynNostrDatabase> {
-        self.inner.database()
+    #[inline]
+    pub fn database(&self) -> &Arc<DynNostrDatabase> {
+        &self.inner.database
     }
 
-    /// Get relays
+    /// Get relay filtering
+    #[inline]
+    pub fn filtering(&self) -> &RelayFiltering {
+        &self.inner.filtering
+    }
+
+    /// Get all relays
+    ///
+    /// This method return all relays added to the pool, including the ones for gossip protocol or other services.
+    #[inline]
+    pub async fn all_relays(&self) -> HashMap<Url, Relay> {
+        self.inner.all_relays().await
+    }
+
+    /// Get relays with `READ` or `WRITE` flags
+    #[inline]
     pub async fn relays(&self) -> HashMap<Url, Relay> {
         self.inner.relays().await
     }
 
+    /// Get relays that have a certain [RelayServiceFlag] enabled
+    #[inline]
+    pub async fn relays_with_flag(
+        &self,
+        flag: RelayServiceFlags,
+        check: FlagCheck,
+    ) -> HashMap<Url, Relay> {
+        self.inner.relays_with_flag(flag, check).await
+    }
+
     /// Get [`Relay`]
+    #[inline]
     pub async fn relay<U>(&self, url: U) -> Result<Relay, Error>
     where
         U: TryIntoUrl,
@@ -124,39 +167,91 @@ impl RelayPool {
     }
 
     /// Add new relay
+    ///
+    /// If are set pool subscriptions, the new added relay will inherit them. Use `subscribe_to` method instead of `subscribe`,
+    /// to avoid to set pool subscriptions.
+    #[inline]
     pub async fn add_relay<U>(&self, url: U, opts: RelayOptions) -> Result<bool, Error>
     where
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        self.inner.add_relay(url, opts).await
+        self.inner.add_relay(url, true, opts).await
     }
 
-    /// Disconnect and remove relay
+    /// Try to get relay by `url` or add it to pool.
+    ///
+    /// Return `Some(..)` only if the relay already exists.
+    #[inline]
+    pub async fn get_or_add_relay<U>(
+        &self,
+        url: U,
+        inherit_pool_subscriptions: bool,
+        opts: RelayOptions,
+    ) -> Result<Option<Relay>, Error>
+    where
+        U: TryIntoUrl + Clone,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner
+            .get_or_add_relay(url, inherit_pool_subscriptions, opts)
+            .await
+    }
+
+    /// Remove and disconnect relay
+    ///
+    /// If the relay has `INBOX` or `OUTBOX` flags, it will not be removed from the pool and its
+    /// flags will be updated (remove `READ`, `WRITE` and `DISCOVERY` flags).
+    #[inline]
     pub async fn remove_relay<U>(&self, url: U) -> Result<(), Error>
     where
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        self.inner.remove_relay(url).await
+        self.inner.remove_relay(url, false).await
+    }
+
+    /// Force remove and disconnect relay
+    ///
+    /// Note: this method will remove the relay, also if it's in use for the gossip model or other service!
+    #[inline]
+    pub async fn force_remove_relay<U>(&self, url: U) -> Result<(), Error>
+    where
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner.remove_relay(url, true).await
     }
 
     /// Disconnect and remove all relays
+    ///
+    /// This method may not remove all relays.
+    /// Use [`RelayPool::force_remove_all_relays`] to remove every relay.
+    #[inline]
     pub async fn remove_all_relays(&self) -> Result<(), Error> {
-        self.inner.remove_all_relays().await
+        self.inner.remove_all_relays(false).await
+    }
+
+    /// Disconnect and force remove all relays
+    #[inline]
+    pub async fn force_remove_all_relays(&self) -> Result<(), Error> {
+        self.inner.remove_all_relays(true).await
     }
 
     /// Connect to all added relays and keep connection alive
+    #[inline]
     pub async fn connect(&self, connection_timeout: Option<Duration>) {
         self.inner.connect(connection_timeout).await
     }
 
     /// Disconnect from all relays
+    #[inline]
     pub async fn disconnect(&self) -> Result<(), Error> {
         self.inner.disconnect().await
     }
 
     /// Connect to relay
+    #[inline]
     pub async fn connect_relay<U>(
         &self,
         url: U,
@@ -166,169 +261,301 @@ impl RelayPool {
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        let relay = self.relay(url).await?;
-        self.inner.connect_relay(&relay, connection_timeout).await;
-        Ok(())
+        self.inner.connect_relay(url, connection_timeout).await
+    }
+
+    /// Disconnect relay
+    #[inline]
+    pub async fn disconnect_relay<U>(&self, url: U) -> Result<(), Error>
+    where
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner.disconnect_relay(url).await
     }
 
     /// Get subscriptions
+    #[inline]
     pub async fn subscriptions(&self) -> HashMap<SubscriptionId, Vec<Filter>> {
         self.inner.subscriptions().await
     }
 
     /// Get subscription
+    #[inline]
     pub async fn subscription(&self, id: &SubscriptionId) -> Option<Vec<Filter>> {
         self.inner.subscription(id).await
     }
 
-    /// Send client message to all connected relays
-    pub async fn send_msg(&self, msg: ClientMessage, opts: RelaySendOptions) -> Result<(), Error> {
-        self.inner.send_msg(msg, opts).await
-    }
-
-    /// Send multiple client messages at once to all connected relays
-    pub async fn batch_msg(
-        &self,
-        msgs: Vec<ClientMessage>,
-        opts: RelaySendOptions,
-    ) -> Result<(), Error> {
-        self.inner.batch_msg(msgs, opts).await
+    /// Register subscription in the [RelayPool]
+    ///
+    /// When a new relay will be added, saved subscriptions will be automatically used for it.
+    #[inline]
+    pub async fn save_subscription(&self, id: SubscriptionId, filters: Vec<Filter>) {
+        self.inner.save_subscription(id, filters).await
     }
 
     /// Send client message to specific relays
     ///
     /// Note: **the relays must already be added!**
-    pub async fn send_msg_to<I, U>(
-        &self,
-        urls: I,
-        msg: ClientMessage,
-        opts: RelaySendOptions,
-    ) -> Result<(), Error>
+    #[inline]
+    pub async fn send_msg_to<I, U>(&self, urls: I, msg: ClientMessage) -> Result<Output<()>, Error>
     where
         I: IntoIterator<Item = U>,
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        self.inner.send_msg_to(urls, msg, opts).await
+        self.inner.send_msg_to(urls, msg).await
     }
 
     /// Send multiple client messages at once to specific relays
     ///
     /// Note: **the relays must already be added!**
+    #[inline]
     pub async fn batch_msg_to<I, U>(
         &self,
         urls: I,
         msgs: Vec<ClientMessage>,
-        opts: RelaySendOptions,
-    ) -> Result<(), Error>
+    ) -> Result<Output<()>, Error>
     where
         I: IntoIterator<Item = U>,
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        self.inner.batch_msg_to(urls, msgs, opts).await
+        self.inner.batch_msg_to(urls, msgs).await
     }
 
-    /// Send event to **all connected relays** and wait for `OK` message
-    pub async fn send_event(&self, event: Event, opts: RelaySendOptions) -> Result<EventId, Error> {
-        self.inner.send_event(event, opts).await
+    /// Send event to all relays with `WRITE` flag (check [`RelayServiceFlags`] for more details).
+    #[inline]
+    pub async fn send_event(&self, event: Event) -> Result<Output<EventId>, Error> {
+        self.inner.send_event(event).await
     }
 
-    /// Send multiple [`Event`] at once to **all connected relays** and wait for `OK` message
-    pub async fn batch_event(
-        &self,
-        events: Vec<Event>,
-        opts: RelaySendOptions,
-    ) -> Result<(), Error> {
-        self.inner.batch_event(events, opts).await
+    /// Send multiple events at once to all relays with `WRITE` flag (check [`RelayServiceFlags`] for more details).
+    #[inline]
+    pub async fn batch_event(&self, events: Vec<Event>) -> Result<Output<()>, Error> {
+        self.inner.batch_event(events).await
     }
 
-    /// Send event to **specific relays** and wait for `OK` message
-    pub async fn send_event_to<I, U>(
-        &self,
-        urls: I,
-        event: Event,
-        opts: RelaySendOptions,
-    ) -> Result<EventId, Error>
+    /// Send event to specific relays
+    #[inline]
+    pub async fn send_event_to<I, U>(&self, urls: I, event: Event) -> Result<Output<EventId>, Error>
     where
         I: IntoIterator<Item = U>,
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        self.inner.send_event_to(urls, event, opts).await
+        self.inner.send_event_to(urls, event).await
     }
 
-    /// Send multiple events at once to **specific relays** and wait for `OK` message
+    /// Send multiple events at once to specific relays
+    #[inline]
     pub async fn batch_event_to<I, U>(
         &self,
         urls: I,
         events: Vec<Event>,
-        opts: RelaySendOptions,
-    ) -> Result<(), Error>
+    ) -> Result<Output<()>, Error>
     where
         I: IntoIterator<Item = U>,
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        self.inner.batch_event_to(urls, events, opts).await
+        self.inner.batch_event_to(urls, events).await
     }
 
-    /// Subscribe to filters
+    /// Subscribe to filters to all relays with `READ` flag.
     ///
     /// ### Auto-closing subscription
     ///
     /// It's possible to automatically close a subscription by configuring the [SubscribeOptions].
     ///
     /// Note: auto-closing subscriptions aren't saved in subscriptions map!
-    pub async fn subscribe(&self, filters: Vec<Filter>, opts: SubscribeOptions) -> SubscriptionId {
+    #[inline]
+    pub async fn subscribe(
+        &self,
+        filters: Vec<Filter>,
+        opts: SubscribeOptions,
+    ) -> Result<Output<SubscriptionId>, Error> {
         self.inner.subscribe(filters, opts).await
     }
 
-    /// Subscribe to filters with custom [SubscriptionId]
+    /// Subscribe to filters with custom [SubscriptionId] to all relays with `READ` flag.
     ///
     /// ### Auto-closing subscription
     ///
     /// It's possible to automatically close a subscription by configuring the [SubscribeOptions].
     ///
     /// Note: auto-closing subscriptions aren't saved in subscriptions map!
+    #[inline]
     pub async fn subscribe_with_id(
         &self,
         id: SubscriptionId,
         filters: Vec<Filter>,
         opts: SubscribeOptions,
-    ) {
+    ) -> Result<Output<()>, Error> {
         self.inner.subscribe_with_id(id, filters, opts).await
     }
 
+    /// Subscribe to filters to specific relays
+    ///
+    /// ### Auto-closing subscription
+    ///
+    /// It's possible to automatically close a subscription by configuring the [SubscribeOptions].
+    #[inline]
+    pub async fn subscribe_to<I, U>(
+        &self,
+        urls: I,
+        filters: Vec<Filter>,
+        opts: SubscribeOptions,
+    ) -> Result<Output<SubscriptionId>, Error>
+    where
+        I: IntoIterator<Item = U>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner.subscribe_to(urls, filters, opts).await
+    }
+
+    /// Subscribe to filters with custom [SubscriptionId] to specific relays
+    ///
+    /// ### Auto-closing subscription
+    ///
+    /// It's possible to automatically close a subscription by configuring the [SubscribeOptions].
+    #[inline]
+    pub async fn subscribe_with_id_to<I, U>(
+        &self,
+        urls: I,
+        id: SubscriptionId,
+        filters: Vec<Filter>,
+        opts: SubscribeOptions,
+    ) -> Result<Output<()>, Error>
+    where
+        I: IntoIterator<Item = U>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner
+            .subscribe_with_id_to(urls, id, filters, opts)
+            .await
+    }
+
+    /// Targeted subscription
+    ///
+    /// Subscribe to specific relays with specific filters
+    #[inline]
+    pub async fn subscribe_targeted<I, U>(
+        &self,
+        id: SubscriptionId,
+        targets: I,
+        opts: SubscribeOptions,
+    ) -> Result<Output<()>, Error>
+    where
+        I: IntoIterator<Item = (U, Vec<Filter>)>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner.subscribe_targeted(id, targets, opts).await
+    }
+
     /// Unsubscribe from subscription
-    pub async fn unsubscribe(&self, id: SubscriptionId, opts: RelaySendOptions) {
-        self.inner.unsubscribe(id, opts).await
+    #[inline]
+    pub async fn unsubscribe(&self, id: SubscriptionId) {
+        self.inner.unsubscribe(id).await
     }
 
     /// Unsubscribe from all subscriptions
-    pub async fn unsubscribe_all(&self, opts: RelaySendOptions) {
-        self.inner.unsubscribe_all(opts).await
+    #[inline]
+    pub async fn unsubscribe_all(&self) {
+        self.inner.unsubscribe_all().await
     }
 
-    /// Get events of filters
-    ///
-    /// Get events both from **local database** and **relays**
+    /// Sync events with relays (negentropy reconciliation)
+    #[inline]
+    pub async fn sync(
+        &self,
+        filter: Filter,
+        opts: &SyncOptions,
+    ) -> Result<Output<Reconciliation>, Error> {
+        self.inner.sync(filter, opts).await
+    }
+
+    /// Sync events with specific relays (negentropy reconciliation)
+    #[inline]
+    pub async fn sync_with<I, U>(
+        &self,
+        urls: I,
+        filter: Filter,
+        opts: &SyncOptions,
+    ) -> Result<Output<Reconciliation>, Error>
+    where
+        I: IntoIterator<Item = U>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner.sync_with(urls, filter, opts).await
+    }
+
+    /// Sync events with specific relays and filters (negentropy reconciliation)
+    #[inline]
+    pub async fn sync_targeted<I, U>(
+        &self,
+        targets: I,
+        opts: &SyncOptions,
+    ) -> Result<Output<Reconciliation>, Error>
+    where
+        I: IntoIterator<Item = (U, HashMap<Filter, Vec<(EventId, Timestamp)>>)>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner.sync_targeted(targets, opts).await
+    }
+
+    /// Fetch events from relays with [`RelayServiceFlags::READ`] flag.
+    #[inline]
+    pub async fn fetch_events(
+        &self,
+        filters: Vec<Filter>,
+        timeout: Duration,
+        opts: FilterOptions,
+    ) -> Result<Events, Error> {
+        self.inner.fetch_events(filters, timeout, opts).await
+    }
+
+    /// Get events of filters from relays with `READ` flag.
+    #[deprecated(since = "0.36.0", note = "Use `fetch_events` instead")]
     pub async fn get_events_of(
         &self,
         filters: Vec<Filter>,
         timeout: Duration,
         opts: FilterOptions,
     ) -> Result<Vec<Event>, Error> {
-        let relays = self.relays().await;
-        self.get_events_from(relays.into_keys(), filters, timeout, opts)
+        Ok(self
+            .inner
+            .fetch_events(filters, timeout, opts)
+            .await?
+            .to_vec())
+    }
+
+    /// Fetch events from specific relays
+    #[inline]
+    pub async fn fetch_events_from<I, U>(
+        &self,
+        urls: I,
+        filters: Vec<Filter>,
+        timeout: Duration,
+        opts: FilterOptions,
+    ) -> Result<Events, Error>
+    where
+        I: IntoIterator<Item = U>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner
+            .fetch_events_from(urls, filters, timeout, opts)
             .await
     }
 
-    /// Get events of filters from **specific relays**
-    ///
-    /// Get events both from **local database** and **relays**
-    ///
-    /// If no relay is specified, will be queried only the database.
+    /// Get events of filters from specific relays
+    #[deprecated(since = "0.36.0", note = "Use `fetch_events_from` instead")]
     pub async fn get_events_from<I, U>(
         &self,
         urls: I,
@@ -341,24 +568,71 @@ impl RelayPool {
         U: TryIntoUrl,
         Error: From<<U as TryIntoUrl>::Err>,
     {
+        Ok(self
+            .inner
+            .fetch_events_from(urls, filters, timeout, opts)
+            .await?
+            .to_vec())
+    }
+
+    /// Stream events
+    #[deprecated(since = "0.36.0", note = "Use `stream_events` instead")]
+    pub async fn stream_events_of(
+        &self,
+        filters: Vec<Filter>,
+        timeout: Duration,
+        opts: FilterOptions,
+    ) -> Result<ReceiverStream<Event>, Error> {
+        self.stream_events(filters, timeout, opts).await
+    }
+
+    /// Stream events from relays with `READ` flag.
+    #[inline]
+    pub async fn stream_events(
+        &self,
+        filters: Vec<Filter>,
+        timeout: Duration,
+        opts: FilterOptions,
+    ) -> Result<ReceiverStream<Event>, Error> {
+        self.inner.stream_events(filters, timeout, opts).await
+    }
+
+    /// Stream events from specific relays
+    #[inline]
+    pub async fn stream_events_from<I, U>(
+        &self,
+        urls: I,
+        filters: Vec<Filter>,
+        timeout: Duration,
+        opts: FilterOptions,
+    ) -> Result<ReceiverStream<Event>, Error>
+    where
+        I: IntoIterator<Item = U>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
         self.inner
-            .get_events_from(urls, filters, timeout, opts)
+            .stream_events_from(urls, filters, timeout, opts)
             .await
     }
 
-    /// Negentropy reconciliation
-    pub async fn reconcile(&self, filter: Filter, opts: NegentropyOptions) -> Result<(), Error> {
-        self.inner.reconcile(filter, opts).await
-    }
-
-    /// Negentropy reconciliation with custom items
-    pub async fn reconcile_with_items(
+    /// Targeted streaming events
+    ///
+    /// Stream events from specific relays with specific filters
+    pub async fn stream_events_targeted<I, U>(
         &self,
-        filter: Filter,
-        items: Vec<(EventId, Timestamp)>,
-        opts: NegentropyOptions,
-    ) -> Result<(), Error> {
-        self.inner.reconcile_with_items(filter, items, opts).await
+        source: I,
+        timeout: Duration,
+        opts: FilterOptions,
+    ) -> Result<ReceiverStream<Event>, Error>
+    where
+        I: IntoIterator<Item = (U, Vec<Filter>)>,
+        U: TryIntoUrl,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        self.inner
+            .stream_events_targeted(source, timeout, opts)
+            .await
     }
 
     /// Handle notifications
@@ -369,12 +643,11 @@ impl RelayPool {
     {
         let mut notifications = self.notifications();
         while let Ok(notification) = notifications.recv().await {
-            let stop: bool = RelayPoolNotification::Stop == notification;
             let shutdown: bool = RelayPoolNotification::Shutdown == notification;
             let exit: bool = func(notification)
                 .await
                 .map_err(|e| Error::Handler(e.to_string()))?;
-            if exit || stop || shutdown {
+            if exit || shutdown {
                 break;
             }
         }

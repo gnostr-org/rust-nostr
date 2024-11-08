@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP26
+//! NIP26: Delegated Event Signing
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/26.md>
 
@@ -15,7 +15,7 @@ use core::str::FromStr;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
 #[cfg(feature = "std")]
-use bitcoin::secp256k1::rand;
+use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::{CryptoRng, Rng};
 use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::secp256k1::{self, Message, Secp256k1, Signing, Verification};
@@ -33,7 +33,7 @@ use crate::SECP256K1;
 const DELEGATION_KEYWORD: &str = "delegation";
 
 /// `NIP26` error
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     /// Key error
     Key(key::Error),
@@ -122,15 +122,16 @@ impl fmt::Display for ValidationError {
 
 /// Sign delegation.
 /// See `create_delegation_tag` for more complete functionality.
+#[inline]
 #[cfg(feature = "std")]
 pub fn sign_delegation(
     delegator_keys: &Keys,
-    delegatee_pk: PublicKey,
-    conditions: Conditions,
-) -> Result<Signature, Error> {
+    delegatee_pk: &PublicKey,
+    conditions: &Conditions,
+) -> Signature {
     sign_delegation_with_ctx(
         &SECP256K1,
-        &mut rand::thread_rng(),
+        &mut OsRng,
         delegator_keys,
         delegatee_pk,
         conditions,
@@ -143,26 +144,27 @@ pub fn sign_delegation_with_ctx<C, R>(
     secp: &Secp256k1<C>,
     rng: &mut R,
     delegator_keys: &Keys,
-    delegatee_pk: PublicKey,
-    conditions: Conditions,
-) -> Result<Signature, Error>
+    delegatee_pk: &PublicKey,
+    conditions: &Conditions,
+) -> Signature
 where
     C: Signing,
     R: Rng + CryptoRng,
 {
     let unhashed_token = DelegationToken::new(delegatee_pk, conditions);
     let hashed_token = Sha256Hash::hash(unhashed_token.as_bytes());
-    let message = Message::from_slice(hashed_token.as_byte_array())?;
-    Ok(delegator_keys.sign_schnorr_with_ctx(secp, &message, rng)?)
+    let message: Message = Message::from_digest(hashed_token.to_byte_array());
+    delegator_keys.sign_schnorr_with_ctx(secp, &message, rng)
 }
 
 /// Verify delegation signature
+#[inline]
 #[cfg(feature = "std")]
 pub fn verify_delegation_signature(
-    delegator_public_key: PublicKey,
+    delegator_public_key: &PublicKey,
     signature: Signature,
-    delegatee_public_key: PublicKey,
-    conditions: Conditions,
+    delegatee_public_key: &PublicKey,
+    conditions: &Conditions,
 ) -> Result<(), Error> {
     verify_delegation_signature_with_ctx(
         &SECP256K1,
@@ -176,18 +178,18 @@ pub fn verify_delegation_signature(
 /// Verify delegation signature
 pub fn verify_delegation_signature_with_ctx<C>(
     secp: &Secp256k1<C>,
-    delegator_public_key: PublicKey,
+    delegator_public_key: &PublicKey,
     signature: Signature,
-    delegatee_public_key: PublicKey,
-    conditions: Conditions,
+    delegatee_public_key: &PublicKey,
+    conditions: &Conditions,
 ) -> Result<(), Error>
 where
     C: Verification,
 {
     let unhashed_token = DelegationToken::new(delegatee_public_key, conditions);
     let hashed_token = Sha256Hash::hash(unhashed_token.as_bytes());
-    let message = Message::from_slice(hashed_token.as_byte_array())?;
-    secp.verify_schnorr(&signature, &message, &delegator_public_key)?;
+    let message = Message::from_digest(hashed_token.to_byte_array());
+    secp.verify_schnorr(&signature, &message, delegator_public_key)?;
     Ok(())
 }
 
@@ -197,7 +199,8 @@ pub struct DelegationToken(String);
 
 impl DelegationToken {
     /// Generate [`DelegationToken`]
-    pub fn new(delegatee_pk: PublicKey, conditions: Conditions) -> Self {
+    #[inline]
+    pub fn new(delegatee_pk: &PublicKey, conditions: &Conditions) -> Self {
         Self(format!(
             "{}:{DELEGATION_KEYWORD}:{delegatee_pk}:{conditions}",
             nip21::SCHEME
@@ -205,6 +208,7 @@ impl DelegationToken {
     }
 
     /// Get as bytes
+    #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
@@ -216,7 +220,7 @@ impl fmt::Display for DelegationToken {
     }
 }
 
-/// Delegation tag, as defined in NIP-26
+/// Delegation tag, as defined in NIP26
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DelegationTag {
     delegator_pubkey: PublicKey,
@@ -226,15 +230,16 @@ pub struct DelegationTag {
 
 impl DelegationTag {
     /// Create a delegation tag (including the signature).
+    #[inline]
     #[cfg(feature = "std")]
     pub fn new(
         delegator_keys: &Keys,
-        delegatee_pubkey: PublicKey,
+        delegatee_pubkey: &PublicKey,
         conditions: Conditions,
-    ) -> Result<Self, Error> {
+    ) -> Self {
         Self::new_with_ctx(
             &SECP256K1,
-            &mut rand::thread_rng(),
+            &mut OsRng,
             delegator_keys,
             delegatee_pubkey,
             conditions,
@@ -246,47 +251,46 @@ impl DelegationTag {
         secp: &Secp256k1<C>,
         rng: &mut R,
         delegator_keys: &Keys,
-        delegatee_pubkey: PublicKey,
+        delegatee_pubkey: &PublicKey,
         conditions: Conditions,
-    ) -> Result<Self, Error>
+    ) -> Self
     where
         C: Signing,
         R: Rng + CryptoRng,
     {
-        let signature = sign_delegation_with_ctx(
-            secp,
-            rng,
-            delegator_keys,
-            delegatee_pubkey,
-            conditions.clone(),
-        )?;
-        Ok(Self {
+        let signature: Signature =
+            sign_delegation_with_ctx(secp, rng, delegator_keys, delegatee_pubkey, &conditions);
+        Self {
             delegator_pubkey: delegator_keys.public_key(),
             conditions,
             signature,
-        })
+        }
     }
 
     /// Get delegator public key
+    #[inline]
     pub fn delegator_pubkey(&self) -> PublicKey {
         self.delegator_pubkey
     }
 
     /// Get conditions
+    #[inline]
     pub fn conditions(&self) -> Conditions {
         self.conditions.clone()
     }
 
     /// Get signature
+    #[inline]
     pub fn signature(&self) -> Signature {
         self.signature
     }
 
     /// Validate a delegation tag, check signature and conditions.
+    #[inline]
     #[cfg(feature = "std")]
     pub fn validate(
         &self,
-        delegatee_pubkey: PublicKey,
+        delegatee_pubkey: &PublicKey,
         event_properties: &EventProperties,
     ) -> Result<(), Error> {
         self.validate_with_ctx(&SECP256K1, delegatee_pubkey, event_properties)
@@ -296,7 +300,7 @@ impl DelegationTag {
     pub fn validate_with_ctx<C>(
         &self,
         secp: &Secp256k1<C>,
-        delegatee_pubkey: PublicKey,
+        delegatee_pubkey: &PublicKey,
         event_properties: &EventProperties,
     ) -> Result<(), Error>
     where
@@ -305,10 +309,10 @@ impl DelegationTag {
         // Verify signature
         verify_delegation_signature_with_ctx(
             secp,
-            self.delegator_pubkey,
+            &self.delegator_pubkey,
             self.signature,
             delegatee_pubkey,
-            self.conditions.clone(),
+            &self.conditions,
         )
         .map_err(|_| Error::ConditionsValidation(ValidationError::InvalidSignature))?;
 
@@ -364,6 +368,7 @@ impl fmt::Display for DelegationTag {
 impl FromStr for DelegationTag {
     type Err = Error;
 
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::from_json(s)
     }
@@ -373,7 +378,7 @@ impl FromStr for DelegationTag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Condition {
     /// Event kind, e.g. kind=1
-    Kind(u64),
+    Kind(u16),
     /// Creation time before, e.g. created_at<1679000000
     CreatedBefore(u64),
     /// Creation time after, e.g. created_at>1676000000
@@ -383,7 +388,7 @@ pub enum Condition {
 /// Represents properties of an event, relevant for delegation
 pub struct EventProperties {
     /// Event kind. For simplicity/flexibility, numeric type is used.
-    kind: u64,
+    kind: u16,
     /// Creation time, as unix timestamp
     created_time: u64,
 }
@@ -412,12 +417,12 @@ impl Condition {
     }
 }
 
-impl ToString for Condition {
-    fn to_string(&self) -> String {
+impl fmt::Display for Condition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Kind(k) => format!("kind={k}"),
-            Self::CreatedBefore(t) => format!("created_at<{t}"),
-            Self::CreatedAfter(t) => format!("created_at>{t}"),
+            Self::Kind(k) => write!(f, "kind={k}"),
+            Self::CreatedBefore(t) => write!(f, "created_at<{t}"),
+            Self::CreatedAfter(t) => write!(f, "created_at>{t}"),
         }
     }
 }
@@ -427,7 +432,7 @@ impl FromStr for Condition {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(kind) = s.strip_prefix("kind=") {
-            let n = u64::from_str(kind)?;
+            let n = u16::from_str(kind)?;
             return Ok(Self::Kind(n));
         }
         if let Some(created_before) = s.strip_prefix("created_at<") {
@@ -443,22 +448,18 @@ impl FromStr for Condition {
 }
 
 /// Set of conditions of a delegation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Conditions(Vec<Condition>);
-
-impl Default for Conditions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl Conditions {
     /// New empty [`Conditions`]
+    #[inline]
     pub fn new() -> Self {
-        Self(Vec::new())
+        Self::default()
     }
 
     /// Add [`Condition`]
+    #[inline]
     pub fn add(&mut self, cond: Condition) {
         self.0.push(cond);
     }
@@ -472,6 +473,7 @@ impl Conditions {
     }
 
     /// Get [`Vec<Condition>`]
+    #[inline]
     pub fn inner(&self) -> Vec<Condition> {
         self.0.clone()
     }
@@ -528,7 +530,8 @@ impl<'de> Deserialize<'de> for Conditions {
 
 impl EventProperties {
     /// Create new with values
-    pub fn new(event_kind: u64, created_time: u64) -> Self {
+    #[inline]
+    pub fn new(event_kind: u16, created_time: u64) -> Self {
         Self {
             kind: event_kind,
             created_time,
@@ -538,8 +541,8 @@ impl EventProperties {
     /// Create from an Event
     pub fn from_event(event: &Event) -> Self {
         Self {
-            kind: event.kind().as_u64(),
-            created_time: event.created_at().as_u64(),
+            kind: event.kind.as_u16(),
+            created_time: event.created_at.as_u64(),
         }
     }
 }
@@ -599,15 +602,14 @@ mod tests {
         let conditions =
             Conditions::from_str("kind=1&created_at>1676067553&created_at<1678659553").unwrap();
 
-        let tag =
-            DelegationTag::new(&delegator_keys, delegatee_pubkey, conditions.clone()).unwrap();
+        let tag = DelegationTag::new(&delegator_keys, &delegatee_pubkey, conditions.clone());
 
         // Verify signature (it's variable)
         let verify_result = verify_delegation_signature(
-            delegator_keys.public_key(),
+            &delegator_keys.public_key(),
             tag.signature(),
-            delegatee_pubkey,
-            conditions,
+            &delegatee_pubkey,
+            &conditions,
         );
         assert!(verify_result.is_ok());
 
@@ -631,10 +633,10 @@ mod tests {
         let conditions =
             Conditions::from_str("kind=1&created_at>1676067553&created_at<1678659553").unwrap();
 
-        let tag = DelegationTag::new(&delegator_keys, delegatee_pubkey, conditions).unwrap();
+        let tag = DelegationTag::new(&delegator_keys, &delegatee_pubkey, conditions);
 
         assert!(tag
-            .validate(delegatee_pubkey, &EventProperties::new(1, 1677000000))
+            .validate(&delegatee_pubkey, &EventProperties::new(1, 1677000000))
             .is_ok());
     }
 
@@ -652,7 +654,7 @@ mod tests {
         assert!(tag
             .validate_with_ctx(
                 &secp,
-                delegatee_pubkey,
+                &delegatee_pubkey,
                 &EventProperties::new(1, 1677000000)
             )
             .is_ok());
@@ -667,7 +669,7 @@ mod tests {
         match tag
             .validate_with_ctx(
                 &secp,
-                delegatee_pubkey,
+                &delegatee_pubkey,
                 &EventProperties::new(5, 1677000000),
             )
             .err()
@@ -691,15 +693,14 @@ mod tests {
         let conditions =
             Conditions::from_str("kind=1&created_at>1674834236&created_at<1677426236").unwrap();
 
-        let signature =
-            sign_delegation(&delegator_keys, delegatee_public_key, conditions.clone()).unwrap();
+        let signature = sign_delegation(&delegator_keys, &delegatee_public_key, &conditions);
 
         // Signature is changing, validate by verify method
         let verify_result = verify_delegation_signature(
-            delegator_keys.public_key(),
+            &delegator_keys.public_key(),
             signature,
-            delegatee_public_key,
-            conditions,
+            &delegatee_public_key,
+            &conditions,
         );
         assert!(verify_result.is_ok());
     }
@@ -712,19 +713,18 @@ mod tests {
                 .unwrap();
         let delegator_keys = Keys::new(delegator_secret_key);
         let delegatee_public_key =
-            PublicKey::from_str("477318cfb5427b9cfc66a9fa376150c1ddbc62115ae27cef72417eb959691396")
+            PublicKey::from_hex("477318cfb5427b9cfc66a9fa376150c1ddbc62115ae27cef72417eb959691396")
                 .unwrap();
         let conditions =
             Conditions::from_str("kind=1&created_at>1674834236&created_at<1677426236").unwrap();
 
-        let signature =
-            sign_delegation(&delegator_keys, delegatee_public_key, conditions.clone()).unwrap();
+        let signature = sign_delegation(&delegator_keys, &delegatee_public_key, &conditions);
 
         // Signature is changing, validate by lowlevel verify
         let unhashed_token: String =
             format!("nostr:delegation:{delegatee_public_key}:{conditions}");
         let hashed_token = Sha256Hash::hash(unhashed_token.as_bytes());
-        let message = Message::from_slice(hashed_token.as_byte_array()).unwrap();
+        let message = Message::from_digest_slice(hashed_token.as_byte_array()).unwrap();
 
         let verify_result =
             SECP256K1.verify_schnorr(&signature, &message, &delegator_keys.public_key());
@@ -750,10 +750,10 @@ mod tests {
 
         let verify_result = verify_delegation_signature_with_ctx(
             &secp,
-            delegator_keys.public_key(),
+            &delegator_keys.public_key(),
             signature,
-            delegatee_pk,
-            conditions,
+            &delegatee_pk,
+            &conditions,
         );
         assert!(verify_result.is_ok());
     }
@@ -765,7 +765,7 @@ mod tests {
                 .unwrap();
         let conditions =
             Conditions::from_str("kind=1&created_at>1674834236&created_at<1677426236").unwrap();
-        let unhashed_token = DelegationToken::new(delegatee_pk, conditions);
+        let unhashed_token = DelegationToken::new(&delegatee_pk, &conditions);
         assert_eq!(
             unhashed_token.to_string().as_str(),
             "nostr:delegation:477318cfb5427b9cfc66a9fa376150c1ddbc62115ae27cef72417eb959691396:kind=1&created_at>1674834236&created_at<1677426236"
@@ -821,11 +821,11 @@ mod tests {
         let conditions =
             Conditions::from_str("kind=1&created_at>1676067553&created_at<1678659553").unwrap();
 
-        let tag = DelegationTag::new(&delegator_keys, delegatee_pubkey, conditions).unwrap();
+        let tag = DelegationTag::new(&delegator_keys, &delegatee_pubkey, conditions);
 
         // Positive
         assert!(tag
-            .validate(delegatee_pubkey, &EventProperties::new(1, 1677000000))
+            .validate(&delegatee_pubkey, &EventProperties::new(1, 1677000000))
             .is_ok());
 
         // Signature verification fails if wrong delegatee key is given
@@ -835,7 +835,7 @@ mod tests {
 
         // Note: Error cannot be tested simply  using equality
         match tag
-            .validate(wrong_pubkey, &EventProperties::new(1, 1677000000))
+            .validate(&wrong_pubkey, &EventProperties::new(1, 1677000000))
             .err()
             .unwrap()
         {
@@ -845,7 +845,7 @@ mod tests {
 
         // Wrong event kind
         match tag
-            .validate(delegatee_pubkey, &EventProperties::new(9, 1677000000))
+            .validate(&delegatee_pubkey, &EventProperties::new(9, 1677000000))
             .err()
             .unwrap()
         {
@@ -855,7 +855,7 @@ mod tests {
 
         // Wrong creation time
         match tag
-            .validate(delegatee_pubkey, &EventProperties::new(1, 1679000000))
+            .validate(&delegatee_pubkey, &EventProperties::new(1, 1679000000))
             .err()
             .unwrap()
         {

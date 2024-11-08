@@ -7,13 +7,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rustdoc::bare_urls)]
+#![allow(unknown_lints)] // TODO: remove when MSRV >= 1.72.0, required for `clippy::arc_with_non_send_sync`
+#![allow(clippy::arc_with_non_send_sync)]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(bench, feature(test))]
-//#![cfg_attr(all(not(feature = "std"), feature = "alloc"), feature(error_in_core))]
-#![cfg_attr(
-    feature = "default",
-    doc = include_str!("../README.md")
-)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(all(feature = "std", feature = "all-nips"), doc = include_str!("../README.md"))]
 
 #[cfg(not(any(feature = "std", feature = "alloc")))]
 compile_error!("at least one of the `std` or `alloc` features must be enabled");
@@ -38,36 +37,45 @@ pub use base64;
 #[cfg(feature = "nip06")]
 pub use bip39;
 #[doc(hidden)]
-pub use bitcoin::{bech32, hashes, secp256k1};
+pub use bitcoin::{self, hashes, secp256k1};
 #[doc(hidden)]
-pub use {bitcoin, negentropy, serde_json};
+pub use serde_json;
 
 pub mod event;
 pub mod key;
 pub mod message;
 pub mod nips;
 pub mod prelude;
+pub mod signer;
 pub mod types;
 pub mod util;
 
-pub use self::event::tag::{
-    ExternalIdentity, HttpMethod, Identity, ImageDimensions, Marker, RelayMetadata, Report, Tag,
-    TagKind,
-};
+#[doc(hidden)]
+pub use self::event::tag::{Tag, TagKind, TagStandard, Tags};
+#[doc(hidden)]
 pub use self::event::{
     Event, EventBuilder, EventId, Kind, MissingPartialEvent, PartialEvent, UnsignedEvent,
 };
+#[doc(hidden)]
 pub use self::key::{Keys, PublicKey, SecretKey};
-pub use self::message::{
-    Alphabet, ClientMessage, Filter, GenericTagValue, RawRelayMessage, RelayMessage,
-    SingleLetterTag, SubscriptionId,
-};
+#[doc(hidden)]
+pub use self::message::{ClientMessage, RawRelayMessage, RelayMessage, SubscriptionId};
+#[doc(hidden)]
 pub use self::nips::nip19::{FromBech32, ToBech32};
-pub use self::types::{Contact, Metadata, Timestamp, TryIntoUrl, UncheckedUrl, Url};
+#[doc(hidden)]
+pub use self::signer::{NostrSigner, SignerError};
+#[doc(hidden)]
+pub use self::types::{
+    Alphabet, Contact, Filter, ImageDimensions, Metadata, SingleLetterTag, Timestamp, TryIntoUrl,
+    UncheckedUrl, Url,
+};
+#[doc(hidden)]
 pub use self::util::JsonUtil;
+#[doc(hidden)]
 #[cfg(feature = "std")]
 pub use self::util::SECP256K1;
 
 /// Result
+#[doc(hidden)]
 #[cfg(feature = "std")]
 pub type Result<T, E = alloc::boxed::Box<dyn std::error::Error>> = std::result::Result<T, E>;

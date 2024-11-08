@@ -3,7 +3,9 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP04
+//! NIP04: Encrypted Direct Message (deprecated in favor of NIP17)
+//!
+//! <div class="warning"><strong>Unsecure!</strong> Deprecated in favor of NIP17!</div>
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/04.md>
 
@@ -67,6 +69,9 @@ impl From<secp256k1::Error> for Error {
 }
 
 /// Encrypt
+///
+/// <div class="warning"><strong>Unsecure!</strong> Deprecated in favor of NIP17!</div>
+#[inline]
 #[cfg(feature = "std")]
 pub fn encrypt<T>(
     secret_key: &SecretKey,
@@ -80,6 +85,8 @@ where
 }
 
 /// Encrypt
+///
+/// <div class="warning"><strong>Unsecure!</strong> Deprecated in favor of NIP17!</div>
 pub fn encrypt_with_rng<R, T>(
     rng: &mut R,
     secret_key: &SecretKey,
@@ -112,6 +119,8 @@ where
 }
 
 /// Decrypts content to bytes
+///
+/// <div class="warning"><strong>Unsecure!</strong> Deprecated in favor of NIP17!</div>
 pub fn decrypt_to_bytes<S>(
     secret_key: &SecretKey,
     public_key: &PublicKey,
@@ -143,6 +152,9 @@ where
 }
 
 /// Decrypts content to a UTF-8 string
+///
+/// <div class="warning"><strong>Unsecure!</strong> Deprecated in favor of NIP17!</div>
+#[inline]
 pub fn decrypt<T>(
     secret_key: &SecretKey,
     public_key: &PublicKey,
@@ -182,22 +194,16 @@ mod tests {
 
         let content = String::from("Saturn, bringer of old age");
 
-        let encrypted_content =
-            encrypt(sender_keys.secret_key().unwrap(), &receiver_pk, &content).unwrap();
+        let encrypted_content = encrypt(sender_keys.secret_key(), &receiver_pk, &content).unwrap();
 
         assert_eq!(
-            decrypt(
-                receiver_keys.secret_key().unwrap(),
-                &sender_pk,
-                &encrypted_content
-            )
-            .unwrap(),
+            decrypt(receiver_keys.secret_key(), &sender_pk, encrypted_content).unwrap(),
             content
         );
 
         assert_eq!(
             decrypt(
-                receiver_keys.secret_key().unwrap(),
+                receiver_keys.secret_key(),
                 &sender_pk,
                 encrypted_content_from_outside
             )
@@ -207,7 +213,7 @@ mod tests {
 
         assert_eq!(
             decrypt(
-                sender_keys.secret_key().unwrap(),
+                sender_keys.secret_key(),
                 &receiver_pk,
                 "invalidcontentformat"
             )
@@ -216,7 +222,7 @@ mod tests {
         );
         assert_eq!(
             decrypt(
-                sender_keys.secret_key().unwrap(),
+                sender_keys.secret_key(),
                 &receiver_pk,
                 "badbase64?iv=encode"
             )
@@ -227,7 +233,7 @@ mod tests {
         // Content encrypted with aes256 using GCM mode
         assert_eq!(
             decrypt(
-                sender_keys.secret_key().unwrap(),
+                sender_keys.secret_key(),
                 &receiver_pk,
                 "nseh0cQPEFID5C0CxYdcPwp091NhRQ==?iv=8PHy8/T19vf4+fr7/P3+/w=="
             )

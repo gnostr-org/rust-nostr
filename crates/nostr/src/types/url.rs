@@ -5,7 +5,8 @@
 //! Url
 
 use alloc::string::String;
-use core::fmt;
+use core::convert::Infallible;
+use core::fmt::{self, Debug};
 use core::str::FromStr;
 
 #[cfg(feature = "std")]
@@ -16,31 +17,44 @@ pub use url_fork::*;
 /// Try into [`Url`]
 pub trait TryIntoUrl {
     /// Error
-    type Err;
+    type Err: Debug;
+
     /// Try into [`Url`]
-    fn try_into_url(&self) -> Result<Url, Self::Err>;
+    fn try_into_url(self) -> Result<Url, Self::Err>;
 }
 
 impl TryIntoUrl for Url {
-    type Err = ParseError;
+    type Err = Infallible;
 
-    fn try_into_url(&self) -> Result<Url, Self::Err> {
-        Ok(self.clone())
+    #[inline]
+    fn try_into_url(self) -> Result<Url, Self::Err> {
+        Ok(self)
     }
 }
 
 impl TryIntoUrl for &Url {
-    type Err = ParseError;
+    type Err = Infallible;
 
-    fn try_into_url(&self) -> Result<Url, Self::Err> {
-        Ok(<&Url>::clone(self).clone())
+    #[inline]
+    fn try_into_url(self) -> Result<Url, Self::Err> {
+        Ok(self.clone())
     }
 }
 
 impl TryIntoUrl for String {
     type Err = ParseError;
 
-    fn try_into_url(&self) -> Result<Url, Self::Err> {
+    #[inline]
+    fn try_into_url(self) -> Result<Url, Self::Err> {
+        Url::parse(&self)
+    }
+}
+
+impl TryIntoUrl for &String {
+    type Err = ParseError;
+
+    #[inline]
+    fn try_into_url(self) -> Result<Url, Self::Err> {
         Url::parse(self)
     }
 }
@@ -48,7 +62,8 @@ impl TryIntoUrl for String {
 impl TryIntoUrl for &str {
     type Err = ParseError;
 
-    fn try_into_url(&self) -> Result<Url, Self::Err> {
+    #[inline]
+    fn try_into_url(self) -> Result<Url, Self::Err> {
         Url::parse(self)
     }
 }
@@ -59,6 +74,7 @@ pub struct UncheckedUrl(String);
 
 impl UncheckedUrl {
     /// New unchecked url
+    #[inline]
     pub fn new<S>(url: S) -> Self
     where
         S: Into<String>,
@@ -67,8 +83,15 @@ impl UncheckedUrl {
     }
 
     /// Empty unchecked url
+    #[inline]
     pub fn empty() -> Self {
         Self(String::new())
+    }
+
+    /// Get unchecked url as `&str`
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -85,6 +108,7 @@ where
 impl FromStr for UncheckedUrl {
     type Err = ParseError;
 
+    #[inline]
     fn from_str(url: &str) -> Result<Self, Self::Err> {
         Ok(Self::from(url))
     }
@@ -93,6 +117,7 @@ impl FromStr for UncheckedUrl {
 impl TryFrom<UncheckedUrl> for Url {
     type Error = ParseError;
 
+    #[inline]
     fn try_from(unchecked_url: UncheckedUrl) -> Result<Url, Self::Error> {
         Self::parse(&unchecked_url.0)
     }

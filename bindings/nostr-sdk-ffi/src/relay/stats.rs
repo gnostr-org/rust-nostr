@@ -4,9 +4,10 @@
 
 use std::time::Duration;
 
-use nostr_ffi::Timestamp;
-use nostr_sdk::{block_on, pool};
+use nostr_sdk::pool;
 use uniffi::Object;
+
+use crate::protocol::Timestamp;
 
 #[derive(Object)]
 pub struct RelayConnectionStats {
@@ -31,9 +32,9 @@ impl RelayConnectionStats {
         self.inner.success() as u64
     }
 
-    /// Uptime
-    pub fn uptime(&self) -> f64 {
-        self.inner.uptime()
+    /// Success rate
+    pub fn success_rate(&self) -> f64 {
+        self.inner.success_rate()
     }
 
     /// Bytes sent
@@ -57,6 +58,6 @@ impl RelayConnectionStats {
     }
 
     pub fn latency(&self) -> Option<Duration> {
-        block_on(async move { self.inner.latency().await })
+        self.inner.latency()
     }
 }

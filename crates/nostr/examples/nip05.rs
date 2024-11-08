@@ -2,22 +2,23 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-use std::str::FromStr;
-
 use nostr::prelude::*;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let public_key =
-        PublicKey::from_str("b2d670de53b27691c0c3400225b65c35a26d06093bcc41f48ffc71e0907f9d4a")?;
+        PublicKey::parse("b2d670de53b27691c0c3400225b65c35a26d06093bcc41f48ffc71e0907f9d4a")?;
 
-    if nip05::verify_blocking(public_key, "0xtr@oxtr.dev", None).is_ok() {
-        println!("NIP-05 verified");
+    if nip05::verify(&public_key, "0xtr@oxtr.dev", None).await? {
+        println!("NIP05 verified");
     } else {
-        println!("NIP-05 NOT verified");
+        println!("NIP05 NOT verified");
     }
 
-    let profile = nip05::get_profile_blocking("_@fiatjaf.com", None)?;
-    println!("Profile example (including relays): {profile:#?}");
+    let profile: Nip05Profile = nip05::profile("_@fiatjaf.com", None).await?;
+    println!("Public key: {}", profile.public_key);
+    println!("Relays: {:?}", profile.relays);
+    println!("Relays (NIP46): {:?}", profile.nip46);
 
     Ok(())
 }

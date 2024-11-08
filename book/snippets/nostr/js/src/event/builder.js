@@ -1,4 +1,4 @@
-const { Keys, loadWasmSync, EventBuilder, Tag, Timestamp } = require("@rust-nostr/nostr");
+const { Keys, loadWasmSync, EventBuilder, Tag, Timestamp, Kind } = require("@rust-nostr/nostr-sdk");
 
 function eventBuilder() {
     // Load WASM
@@ -7,26 +7,28 @@ function eventBuilder() {
     let keys = Keys.generate();
 
     // Compose custom event
-    let customEvent = new EventBuilder(1111, "", []).toEvent(keys);
+    let kind = new Kind(1111);
+    let customEvent = new EventBuilder(kind, "", []).signWithKeys(keys);
 
     // Compose text note
-    let textnoteEvent = EventBuilder.textNote("Hello", []).toEvent(keys);
+    let textnoteEvent = EventBuilder.textNote("Hello", []).signWithKeys(keys);
 
     // Compose reply to above text note
     let replyEvent =
-        EventBuilder.textNote("Reply to hello", [Tag.parse(["e", textnoteEvent.id.toHex()])])
-            .toEvent(keys);
+        EventBuilder.textNote("Reply to hello", [Tag.event(textnoteEvent.id)])
+            .signWithKeys(keys);
 
     // Compose POW event
     let powEvent =
-        EventBuilder.textNote("Another reply with POW", [Tag.parse(["e", textnoteEvent.id.toHex()])])
-            .toPowEvent(keys, 20);
+        EventBuilder.textNote("Another reply with POW", [Tag.event(textnoteEvent.id)])
+            .pow(20)
+            .signWithKeys(keys);
 
     // Compose note with custom timestamp
     let customTimestamp =
         EventBuilder.textNote("Note with custom timestamp", [])
             .customCreatedAt(Timestamp.fromSecs(12345678))
-            .toEvent(keys);
+            .signWithKeys(keys);
 }
 
 module.exports.eventBuilder = eventBuilder;

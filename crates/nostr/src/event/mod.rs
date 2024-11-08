@@ -5,15 +5,16 @@
 
 //! Event
 
+use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
-use core::ops::Deref;
+use core::str::FromStr;
 
 use bitcoin::secp256k1::schnorr::Signature;
-use bitcoin::secp256k1::{self, Message, Secp256k1, Verification};
+use bitcoin::secp256k1::{Message, Secp256k1, Verification};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -30,15 +31,26 @@ pub use self::builder::EventBuilder;
 pub use self::id::EventId;
 pub use self::kind::Kind;
 pub use self::partial::{MissingPartialEvent, PartialEvent};
-pub use self::tag::{Marker, Tag, TagKind};
+#[cfg(feature = "std")]
+use self::tag::list::TagsIndexes;
+pub use self::tag::{Tag, TagKind, TagStandard, Tags};
 pub use self::unsigned::UnsignedEvent;
 use crate::nips::nip01::Coordinate;
+use crate::types::metadata;
 #[cfg(feature = "std")]
 use crate::types::time::Instant;
 use crate::types::time::TimeSupplier;
 #[cfg(feature = "std")]
 use crate::SECP256K1;
-use crate::{JsonUtil, PublicKey, Timestamp};
+use crate::{JsonUtil, Metadata, PublicKey, Timestamp};
+
+const ID: &str = "id";
+const PUBKEY: &str = "pubkey";
+const CREATED_AT: &str = "created_at";
+const KIND: &str = "kind";
+const TAGS: &str = "tags";
+const CONTENT: &str = "content";
+const SIG: &str = "sig";
 
 /// [`Event`] error
 #[derive(Debug, PartialEq, Eq)]
@@ -47,12 +59,10 @@ pub enum Error {
     InvalidSignature,
     /// Invalid event id
     InvalidId,
+    /// Unknown JSON event key
+    UnknownKey(String),
     /// Error serializing or deserializing JSON data
     Json(String),
-    /// Secp256k1 error
-    Secp256k1(secp256k1::Error),
-    /// Hex decoding error
-    Hex(bitcoin::hashes::hex::Error),
 }
 
 #[cfg(feature = "std")]
@@ -63,9 +73,8 @@ impl fmt::Display for Error {
         match self {
             Self::InvalidSignature => write!(f, "Invalid signature"),
             Self::InvalidId => write!(f, "Invalid event id"),
+            Self::UnknownKey(key) => write!(f, "Unknown JSON event key: {key}"),
             Self::Json(e) => write!(f, "Json: {e}"),
-            Self::Secp256k1(e) => write!(f, "Secp256k1: {e}"),
-            Self::Hex(e) => write!(f, "Hex: {e}"),
         }
     }
 }
@@ -76,44 +85,50 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-impl From<secp256k1::Error> for Error {
-    fn from(e: secp256k1::Error) -> Self {
-        Self::Secp256k1(e)
-    }
-}
-
-impl From<bitcoin::hashes::hex::Error> for Error {
-    fn from(e: bitcoin::hashes::hex::Error) -> Self {
-        Self::Hex(e)
-    }
-}
-
-/// [`Event`] struct
+/// Nostr event
 #[derive(Clone)]
 pub struct Event {
-    /// Event
-    inner: EventIntermediate,
-    /// JSON deserialization key order
-    deser_order: Vec<String>,
+    /// ID
+    pub id: EventId,
+    /// Author
+    pub pubkey: PublicKey,
+    /// UNIX timestamp (seconds)
+    pub created_at: Timestamp,
+    /// Kind
+    pub kind: Kind,
+    /// Tag list
+    pub tags: Tags,
+    /// Content
+    pub content: String,
+    /// Signature
+    pub sig: Signature,
+    /// JSON de/serialization order
+    deser_order: Vec<EventKey>,
 }
 
 impl fmt::Debug for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Event")
-            .field("id", &self.inner.id)
-            .field("pubkey", &self.inner.pubkey)
-            .field("created_at", &self.inner.created_at)
-            .field("kind", &self.inner.kind)
-            .field("tags", &self.inner.tags)
-            .field("content", &self.inner.content)
-            .field("sig", &self.inner.sig)
+            .field(ID, &self.id)
+            .field(PUBKEY, &self.pubkey)
+            .field(CREATED_AT, &self.created_at)
+            .field(KIND, &self.kind)
+            .field(TAGS, &self.tags)
+            .field(CONTENT, &self.content)
+            .field(SIG, &self.sig)
             .finish()
     }
 }
 
 impl PartialEq for Event {
     fn eq(&self, other: &Self) -> bool {
-        self.inner.eq(&other.inner)
+        self.id == other.id
+            && self.pubkey == other.pubkey
+            && self.created_at == other.created_at
+            && self.kind == other.kind
+            && self.tags == other.tags
+            && self.content == other.content
+            && self.sig == other.sig
     }
 }
 
@@ -127,21 +142,27 @@ impl PartialOrd for Event {
 
 impl Ord for Event {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.inner.cmp(&other.inner)
+        if self.created_at != other.created_at {
+            // Descending order
+            // NOT EDIT, will break many things!!
+            // If the change is required, search for EVENT_ORD_IMPL comment
+            // in the code and adj things.
+            self.created_at.cmp(&other.created_at).reverse()
+        } else {
+            self.id.cmp(&other.id)
+        }
     }
 }
 
 impl Hash for Event {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.inner.hash(state);
-    }
-}
-
-impl Deref for Event {
-    type Target = EventIntermediate;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.id.hash(state);
+        self.pubkey.hash(state);
+        self.created_at.hash(state);
+        self.kind.hash(state);
+        self.tags.hash(state);
+        self.content.hash(state);
+        self.sig.hash(state);
     }
 }
 
@@ -161,134 +182,87 @@ impl Event {
         S: Into<String>,
     {
         Self {
-            inner: EventIntermediate {
-                id,
-                pubkey: public_key,
-                created_at,
-                kind,
-                tags: tags.into_iter().collect(),
-                content: content.into(),
-                sig,
-            },
+            id,
+            pubkey: public_key,
+            created_at,
+            kind,
+            tags: Tags::new(tags.into_iter().collect()),
+            content: content.into(),
+            sig,
             deser_order: Vec::new(),
         }
     }
 
-    /// Deserialize [`Event`] from [`Value`]
-    ///
-    /// **This method NOT verify the signature!**
-    pub fn from_value(value: Value) -> Result<Self, Error> {
-        Ok(serde_json::from_value(value)?)
+    /// Get content of **first** tag that match [TagKind].
+    #[deprecated(since = "0.36.0", note = "Use `Tags::find` method instead.")]
+    pub fn get_tag_content(&self, kind: TagKind) -> Option<&str> {
+        self.tags.find(kind).and_then(|t| t.content())
     }
 
-    /// Get event ID
-    #[inline]
-    pub fn id(&self) -> EventId {
-        self.inner.id
-    }
-
-    /// Get event author (`pubkey` field)
-    #[inline]
-    pub fn author(&self) -> PublicKey {
-        self.inner.pubkey
-    }
-
-    /// Get event author reference (`pubkey` field)
-    #[inline]
-    pub fn author_ref(&self) -> &PublicKey {
-        &self.inner.pubkey
-    }
-
-    /// Get [Timestamp] of when the event was created
-    #[inline]
-    pub fn created_at(&self) -> Timestamp {
-        self.inner.created_at
-    }
-
-    /// Get event [Kind]
-    #[inline]
-    pub fn kind(&self) -> Kind {
-        self.inner.kind
-    }
-
-    /// Get reference to event tags
-    #[inline]
-    pub fn tags(&self) -> &[Tag] {
-        &self.inner.tags
-    }
-
-    /// Iterate event tags
-    #[inline]
-    pub fn iter_tags(&self) -> impl Iterator<Item = &Tag> {
-        self.inner.tags.iter()
-    }
-
-    /// Iterate and consume event tags
-    #[inline]
-    pub fn into_iter_tags(self) -> impl Iterator<Item = Tag> {
-        self.inner.tags.into_iter()
-    }
-
-    /// Get reference to event content
-    #[inline]
-    pub fn content(&self) -> &str {
-        &self.inner.content
-    }
-
-    /// Get event signature
-    #[inline]
-    pub fn signature(&self) -> Signature {
-        self.inner.sig
+    /// Get content of all tags that match [TagKind].
+    #[deprecated(since = "0.36.0")]
+    pub fn get_tags_content(&self, kind: TagKind) -> Vec<&str> {
+        self.tags
+            .iter()
+            .filter(|t| t.kind() == kind)
+            .filter_map(|t| t.content())
+            .collect()
     }
 
     /// Verify both [`EventId`] and [`Signature`]
+    #[inline]
     #[cfg(feature = "std")]
     pub fn verify(&self) -> Result<(), Error> {
         self.verify_with_ctx(&SECP256K1)
     }
 
-    /// Verify [`EventId`] and [`Signature`]
+    /// Verify both [`EventId`] and [`Signature`]
+    #[inline]
     pub fn verify_with_ctx<C>(&self, secp: &Secp256k1<C>) -> Result<(), Error>
     where
         C: Verification,
     {
         // Verify ID
-        self.verify_id()?;
+        if !self.verify_id() {
+            return Err(Error::InvalidId);
+        }
 
         // Verify signature
-        self.verify_signature_with_ctx(secp)
+        if !self.verify_signature_with_ctx(secp) {
+            return Err(Error::InvalidSignature);
+        }
+
+        Ok(())
     }
 
     /// Verify if the [`EventId`] it's composed correctly
-    pub fn verify_id(&self) -> Result<(), Error> {
+    pub fn verify_id(&self) -> bool {
         let id: EventId = EventId::new(
-            &self.inner.pubkey,
-            self.inner.created_at,
-            &self.inner.kind,
-            &self.inner.tags,
-            &self.inner.content,
+            &self.pubkey,
+            &self.created_at,
+            &self.kind,
+            self.tags.as_slice(),
+            &self.content,
         );
-        if id == self.inner.id {
-            Ok(())
-        } else {
-            Err(Error::InvalidId)
-        }
+        id == self.id
     }
 
     /// Verify only event [`Signature`]
+    #[inline]
     #[cfg(feature = "std")]
-    pub fn verify_signature(&self) -> Result<(), Error> {
-        self.verify_with_ctx(&SECP256K1)
+    pub fn verify_signature(&self) -> bool {
+        self.verify_signature_with_ctx(&SECP256K1)
     }
 
-    /// Verify event [`Signature`]
-    pub fn verify_signature_with_ctx<C>(&self, secp: &Secp256k1<C>) -> Result<(), Error>
+    /// Verify event signature
+    #[inline]
+    pub fn verify_signature_with_ctx<C>(&self, secp: &Secp256k1<C>) -> bool
     where
         C: Verification,
     {
-        let message = Message::from_slice(self.inner.id.as_bytes())?;
-        secp.verify_schnorr(&self.inner.sig, &message, &self.inner.pubkey)
-            .map_err(|_| Error::InvalidSignature)
+        let message: Message = Message::from_digest(self.id.to_bytes());
+        secp.verify_schnorr(&self.sig, &message, &self.pubkey)
+            .is_ok()
     }
 
     /// Check POW
@@ -296,24 +270,20 @@ impl Event {
     /// <https://github.com/nostr-protocol/nips/blob/master/13.md>
     #[inline]
     pub fn check_pow(&self, difficulty: u8) -> bool {
-        self.inner.id.check_pow(difficulty)
+        self.id.check_pow(difficulty)
     }
 
     /// Get [`Timestamp`] expiration if set
-    #[inline]
+    #[deprecated(since = "0.36.0", note = "Use `Tags::expiration` method instead.")]
     pub fn expiration(&self) -> Option<&Timestamp> {
-        for tag in self.iter_tags() {
-            if let Tag::Expiration(timestamp) = tag {
-                return Some(timestamp);
-            }
-        }
-        None
+        self.tags.expiration()
     }
 
     /// Returns `true` if the event has an expiration tag that is expired.
-    /// If an event has no `Expiration` tag, then it will return `false`.
+    /// If an event has no expiration tag, then it will return `false`.
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/40.md>
+    #[inline]
     #[cfg(feature = "std")]
     pub fn is_expired(&self) -> bool {
         let now: Instant = Instant::now();
@@ -321,9 +291,10 @@ impl Event {
     }
 
     /// Returns `true` if the event has an expiration tag that is expired.
-    /// If an event has no `Expiration` tag, then it will return `false`.
+    /// If an event has no expiration tag, then it will return `false`.
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/40.md>
+    #[inline]
     pub fn is_expired_with_supplier<T>(&self, supplier: &T) -> bool
     where
         T: TimeSupplier,
@@ -333,105 +304,68 @@ impl Event {
     }
 
     /// Returns `true` if the event has an expiration tag that is expired.
-    /// If an event has no `Expiration` tag, then it will return `false`.
+    /// If an event has no expiration tag, then it will return `false`.
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/40.md>
     #[inline]
     pub fn is_expired_at(&self, now: &Timestamp) -> bool {
-        if let Some(timestamp) = self.expiration() {
+        if let Some(timestamp) = self.tags.expiration() {
             return timestamp < now;
         }
         false
     }
 
-    /// Check if [`Kind`] is a NIP90 job request
-    ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/90.md>
-    #[inline]
-    pub fn is_job_request(&self) -> bool {
-        self.inner.kind.is_job_request()
-    }
-
-    /// Check if [`Kind`] is a NIP90 job result
-    ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/90.md>
-    #[inline]
-    pub fn is_job_result(&self) -> bool {
-        self.inner.kind.is_job_result()
-    }
-
-    /// Check if event [`Kind`] is `Regular`
-    ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
-    #[inline]
-    pub fn is_regular(&self) -> bool {
-        self.inner.kind.is_regular()
-    }
-
-    /// Check if event [`Kind`] is `Replaceable`
-    ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
-    #[inline]
-    pub fn is_replaceable(&self) -> bool {
-        self.inner.kind.is_replaceable()
-    }
-
-    /// Check if event [`Kind`] is `Ephemeral`
-    ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
-    #[inline]
-    pub fn is_ephemeral(&self) -> bool {
-        self.inner.kind.is_ephemeral()
-    }
-
-    /// Check if event [`Kind`] is `Parameterized replaceable`
-    ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
-    #[inline]
-    pub fn is_parameterized_replaceable(&self) -> bool {
-        self.inner.kind.is_parameterized_replaceable()
-    }
-
     /// Extract identifier (`d` tag), if exists.
-    #[inline]
+    #[deprecated(since = "0.36.0", note = "Use `Tags::identifier` method instead.")]
     pub fn identifier(&self) -> Option<&str> {
-        for tag in self.iter_tags() {
-            if let Tag::Identifier(id) = tag {
-                return Some(id);
-            }
-        }
-        None
+        self.tags.identifier()
     }
 
     /// Extract public keys from tags (`p` tag)
     ///
-    /// **This method extract ONLY `Tag::PublicKey`**
-    #[inline]
+    /// **This method extract ONLY `TagStandard::PublicKey`, `TagStandard::PublicKeyReport` and `TagStandard::PublicKeyLiveEvent` variants**
+    #[deprecated(since = "0.36.0", note = "Use `Tags::public_keys` method instead.")]
     pub fn public_keys(&self) -> impl Iterator<Item = &PublicKey> {
-        self.iter_tags().filter_map(|t| match t {
-            Tag::PublicKey { public_key, .. } => Some(public_key),
-            _ => None,
-        })
+        self.tags.public_keys()
     }
 
     /// Extract event IDs from tags (`e` tag)
     ///
-    /// **This method extract ONLY `Tag::Event`**
-    #[inline]
+    /// **This method extract ONLY `TagStandard::Event` and `TagStandard::EventReport` variants**
+    #[deprecated(since = "0.36.0", note = "Use `Tags::event_ids` method instead.")]
     pub fn event_ids(&self) -> impl Iterator<Item = &EventId> {
-        self.iter_tags().filter_map(|t| match t {
-            Tag::Event { event_id, .. } => Some(event_id),
-            _ => None,
-        })
+        self.tags.event_ids()
     }
 
     /// Extract coordinates from tags (`a` tag)
-    #[inline]
+    ///
+    /// **This method extract ONLY `TagStandard::Coordinate`**
+    #[deprecated(since = "0.36.0", note = "Use `Tags::coordinates` method instead.")]
     pub fn coordinates(&self) -> impl Iterator<Item = &Coordinate> {
-        self.iter_tags().filter_map(|t| match t {
-            Tag::A { coordinate, .. } => Some(coordinate),
-            _ => None,
-        })
+        self.tags.coordinates()
+    }
+
+    /// Extract hashtags from tags (`t` tag)
+    ///
+    /// **This method extract ONLY `TagStandard::Hashtag`**
+    #[deprecated(since = "0.36.0", note = "Use `Tags::hashtags` method instead.")]
+    pub fn hashtags(&self) -> impl Iterator<Item = &str> {
+        self.tags.hashtags()
+    }
+
+    /// Get tags indexes
+    #[deprecated(since = "0.36.0", note = "Use `Tags::indexes` method instead.")]
+    #[cfg(feature = "std")]
+    pub fn tags_indexes(&self) -> &TagsIndexes {
+        self.tags.indexes()
+    }
+
+    /// Check if it's a protected event
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/70.md>
+    #[inline]
+    pub fn is_protected(&self) -> bool {
+        self.tags.find_standardized(TagKind::Protected).is_some()
     }
 }
 
@@ -441,6 +375,7 @@ impl JsonUtil for Event {
     /// Deserialize [`Event`] from JSON
     ///
     /// **This method NOT verify the signature!**
+    #[inline]
     fn from_json<T>(json: T) -> Result<Self, Self::Err>
     where
         T: AsRef<[u8]>,
@@ -449,37 +384,65 @@ impl JsonUtil for Event {
     }
 }
 
-/// Event Intermediate used for de/serialization of [`Event`]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EventIntermediate {
-    /// Id
-    pub id: EventId,
-    /// Author
-    pub pubkey: PublicKey,
-    /// Timestamp (seconds)
-    pub created_at: Timestamp,
-    /// Kind
-    pub kind: Kind,
-    /// Vector of [`Tag`]
-    pub tags: Vec<Tag>,
-    /// Content
-    pub content: String,
-    /// Signature
-    pub sig: Signature,
-}
+impl TryFrom<&Event> for Metadata {
+    type Error = metadata::Error;
 
-impl PartialOrd for EventIntermediate {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+    fn try_from(event: &Event) -> Result<Self, Self::Error> {
+        Metadata::from_json(&event.content)
     }
 }
 
-impl Ord for EventIntermediate {
-    fn cmp(&self, other: &Self) -> Ordering {
-        if self.created_at != other.created_at {
-            self.created_at.cmp(&other.created_at)
-        } else {
-            self.id.cmp(&other.id)
+/// Supported event keys
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum EventKey {
+    Id,
+    PubKey,
+    CreatedAt,
+    Kind,
+    Tags,
+    Content,
+    Sig,
+}
+
+impl FromStr for EventKey {
+    type Err = Error;
+
+    fn from_str(key: &str) -> Result<Self, Self::Err> {
+        match key {
+            ID => Ok(Self::Id),
+            PUBKEY => Ok(Self::PubKey),
+            CREATED_AT => Ok(Self::CreatedAt),
+            KIND => Ok(Self::Kind),
+            TAGS => Ok(Self::Tags),
+            CONTENT => Ok(Self::Content),
+            SIG => Ok(Self::Sig),
+            k => Err(Error::UnknownKey(k.to_string())),
+        }
+    }
+}
+
+/// Struct used for de/serialization of [`Event`]
+#[derive(Serialize, Deserialize)]
+struct EventIntermediate<'a> {
+    pub id: Cow<'a, EventId>,
+    pub pubkey: Cow<'a, PublicKey>,
+    pub created_at: Cow<'a, Timestamp>,
+    pub kind: Cow<'a, Kind>,
+    pub tags: Cow<'a, Tags>,
+    pub content: Cow<'a, String>,
+    pub sig: Cow<'a, Signature>,
+}
+
+impl<'a> From<&'a Event> for EventIntermediate<'a> {
+    fn from(e: &'a Event) -> Self {
+        Self {
+            id: Cow::Borrowed(&e.id),
+            pubkey: Cow::Borrowed(&e.pubkey),
+            created_at: Cow::Borrowed(&e.created_at),
+            kind: Cow::Borrowed(&e.kind),
+            tags: Cow::Borrowed(&e.tags),
+            content: Cow::Borrowed(&e.content),
+            sig: Cow::Borrowed(&e.sig),
         }
     }
 }
@@ -490,19 +453,19 @@ impl Serialize for Event {
         S: Serializer,
     {
         if self.deser_order.is_empty() {
-            self.inner.serialize(serializer)
+            let e: EventIntermediate<'_> = self.into();
+            e.serialize(serializer)
         } else {
             let mut s = serializer.serialize_struct("Event", 7)?;
             for key in self.deser_order.iter() {
-                match key.as_str() {
-                    "id" => s.serialize_field("id", &self.inner.id)?,
-                    "pubkey" => s.serialize_field("pubkey", &self.inner.pubkey)?,
-                    "created_at" => s.serialize_field("created_at", &self.inner.created_at)?,
-                    "kind" => s.serialize_field("kind", &self.inner.kind)?,
-                    "tags" => s.serialize_field("tags", &self.inner.tags)?,
-                    "content" => s.serialize_field("content", &self.inner.content)?,
-                    "sig" => s.serialize_field("sig", &self.inner.sig)?,
-                    _ => return Err(serde::ser::Error::custom(format!("Unknown key: {}", key))),
+                match key {
+                    EventKey::Id => s.serialize_field(ID, &self.id)?,
+                    EventKey::PubKey => s.serialize_field(PUBKEY, &self.pubkey)?,
+                    EventKey::CreatedAt => s.serialize_field(CREATED_AT, &self.created_at)?,
+                    EventKey::Kind => s.serialize_field(KIND, &self.kind)?,
+                    EventKey::Tags => s.serialize_field(TAGS, &self.tags)?,
+                    EventKey::Content => s.serialize_field(CONTENT, &self.content)?,
+                    EventKey::Sig => s.serialize_field(SIG, &self.sig)?,
                 }
             }
             s.end()
@@ -517,13 +480,26 @@ impl<'de> Deserialize<'de> for Event {
     {
         let value: Value = Value::deserialize(deserializer)?;
 
-        let mut deser_order: Vec<String> = Vec::with_capacity(7);
-        if let Value::Object(map) = &value {
-            deser_order = map.keys().cloned().collect();
-        }
+        let deser_order: Vec<EventKey> = value
+            .as_object()
+            .map(|map| {
+                map.keys()
+                    .filter_map(|k| EventKey::from_str(k).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let inter: EventIntermediate<'_> =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
 
         Ok(Self {
-            inner: serde_json::from_value(value).map_err(serde::de::Error::custom)?,
+            id: inter.id.into_owned(),
+            pubkey: inter.pubkey.into_owned(),
+            created_at: inter.created_at.into_owned(),
+            kind: inter.kind.into_owned(),
+            tags: inter.tags.into_owned(),
+            content: inter.content.into_owned(),
+            sig: inter.sig.into_owned(),
             deser_order,
         })
     }
@@ -548,15 +524,15 @@ mod tests {
     fn test_custom_kind() {
         let keys = Keys::generate();
         let e: Event = EventBuilder::new(Kind::Custom(123), "my content", [])
-            .to_event(&keys)
+            .sign_with_keys(&keys)
             .unwrap();
 
         let serialized = e.as_json();
         let deserialized = Event::from_json(serialized).unwrap();
 
         assert_eq!(e, deserialized);
-        assert_eq!(Kind::Custom(123), e.kind());
-        assert_eq!(Kind::Custom(123), deserialized.kind());
+        assert_eq!(Kind::Custom(123), e.kind);
+        assert_eq!(Kind::Custom(123), deserialized.kind);
     }
 
     #[test]
@@ -564,8 +540,8 @@ mod tests {
     fn test_event_expired() {
         let my_keys = Keys::generate();
         let event =
-            EventBuilder::text_note("my content", [Tag::Expiration(Timestamp::from(1600000000))])
-                .to_event(&my_keys)
+            EventBuilder::text_note("my content", [Tag::expiration(Timestamp::from(1600000000))])
+                .sign_with_keys(&my_keys)
                 .unwrap();
 
         assert!(&event.is_expired());
@@ -580,9 +556,9 @@ mod tests {
         let my_keys = Keys::generate();
         let event = EventBuilder::text_note(
             "my content",
-            [Tag::Expiration(Timestamp::from(expiry_date))],
+            [Tag::expiration(Timestamp::from(expiry_date))],
         )
-        .to_event(&my_keys)
+        .sign_with_keys(&my_keys)
         .unwrap();
 
         assert!(!&event.is_expired());
@@ -593,7 +569,7 @@ mod tests {
     fn test_event_without_expiration_tag() {
         let my_keys = Keys::generate();
         let event = EventBuilder::text_note("my content", [])
-            .to_event(&my_keys)
+            .sign_with_keys(&my_keys)
             .unwrap();
         assert!(!&event.is_expired());
     }
@@ -601,10 +577,10 @@ mod tests {
     #[test]
     fn test_verify_event_id() {
         let event = Event::from_json(r#"{"content":"","created_at":1698412975,"id":"f55c30722f056e330d8a7a6a9ba1522f7522c0f1ced1c93d78ea833c78a3d6ec","kind":3,"pubkey":"f831caf722214748c72db4829986bd0cbb2bb8b3aeade1c959624a52a9629046","sig":"5092a9ffaecdae7d7794706f085ff5852befdf79df424cc3419bb797bf515ae05d4f19404cb8324b8b4380a4bd497763ac7b0f3b1b63ef4d3baa17e5f5901808","tags":[["p","4ddeb9109a8cd29ba279a637f5ec344f2479ee07df1f4043f3fe26d8948cfef9","",""],["p","bb6fd06e156929649a73e6b278af5e648214a69d88943702f1fb627c02179b95","",""],["p","b8b8210f33888fdbf5cedee9edf13c3e9638612698fe6408aff8609059053420","",""],["p","9dcee4fabcd690dc1da9abdba94afebf82e1e7614f4ea92d61d52ef9cd74e083","",""],["p","3eea9e831fefdaa8df35187a204d82edb589a36b170955ac5ca6b88340befaa0","",""],["p","885238ab4568f271b572bf48b9d6f99fa07644731f288259bd395998ee24754e","",""],["p","568a25c71fba591e39bebe309794d5c15d27dbfa7114cacb9f3586ea1314d126","",""]]}"#).unwrap();
-        event.verify_id().unwrap();
+        assert!(event.verify_id());
 
         let event = Event::from_json(r#"{"content":"Think about this.\n\nThe most powerful centralized institutions in the world have been replaced by a protocol that protects the individual. #bitcoin\n\nDo you doubt that we can replace everything else?\n\nBullish on the future of humanity\nnostr:nevent1qqs9ljegkuk2m2ewfjlhxy054n6ld5dfngwzuep0ddhs64gc49q0nmqpzdmhxue69uhhyetvv9ukzcnvv5hx7un8qgsw3mfhnrr0l6ll5zzsrtpeufckv2lazc8k3ru5c3wkjtv8vlwngksrqsqqqqqpttgr27","created_at":1703184271,"id":"38acf9b08d06859e49237688a9fd6558c448766f47457236c2331f93538992c6","kind":1,"pubkey":"e8ed3798c6ffebffa08501ac39e271662bfd160f688f94c45d692d8767dd345a","sig":"f76d5ecc8e7de688ac12b9d19edaacdcffb8f0c8fa2a44c00767363af3f04dbc069542ddc5d2f63c94cb5e6ce701589d538cf2db3b1f1211a96596fabb6ecafe","tags":[["e","5fcb28b72cadab2e4cbf7311f4acf5f6d1a99a1c2e642f6b6f0d5518a940f9ec","","mention"],["p","e8ed3798c6ffebffa08501ac39e271662bfd160f688f94c45d692d8767dd345a","","mention"],["t","bitcoin"],["t","bitcoin"]]}"#).unwrap();
-        event.verify_id().unwrap();
+        assert!(event.verify_id());
     }
 
     // Test only with `std` feature due to `serde_json` preserve_order feature.
@@ -622,13 +598,13 @@ mod tests {
         assert_eq!(
             event.deser_order,
             vec![
-                "kind",
-                "pubkey",
-                "content",
-                "created_at",
-                "id",
-                "sig",
-                "tags"
+                EventKey::Kind,
+                EventKey::PubKey,
+                EventKey::Content,
+                EventKey::CreatedAt,
+                EventKey::Id,
+                EventKey::Sig,
+                EventKey::Tags
             ]
         );
         assert_eq!(json, reserialized_json);
@@ -637,6 +613,84 @@ mod tests {
         let event = Event::from_json(json).unwrap();
         let reserialized_json = event.as_json();
         assert_eq!(json, reserialized_json);
+    }
+
+    #[test]
+    fn test_iter_event_ids() {
+        let json = r#"{
+              "content": "+",
+              "created_at": 1716508454,
+              "id": "3e9e9c2fbf263590860a9c60a7de6b0d166230a5a15aa8dcdb70f537cec9807a",
+              "kind": 7,
+              "pubkey": "3bbddb5c7233ad993b41cb639e63122120f391b8580a9b83aae33c648230e0a3",
+              "sig": "3f2ba6d713e4851500b81de2d2ef44b72f1eff061898bf8488e74f7e4ed141b0dadab4c3a9c6b237f3a6db83171bd41eafd7ab973f6fb067a4305e95abeadeee",
+              "tags": [
+                [
+                  "e",
+                  "e1e786c60ed884b6e784712aaf70e63b848b7403ef651b52b701d87739ea1808",
+                  "",
+                  "",
+                  "04c915daefee38317fa734444acee390a8269fe5810b2241e5e6dd343dfbecc9"
+                ],
+                [
+                  "p",
+                  "04c915daefee38317fa734444acee390a8269fe5810b2241e5e6dd343dfbecc9"
+                ]
+              ]
+            }"#;
+        let event = Event::from_json(json).unwrap();
+        assert_eq!(event.tags.event_ids().count(), 1);
+    }
+
+    #[test]
+    fn test_event_with_unknown_fields() {
+        let json: &str = r##"{
+               "citedNotesCache": [],
+               "citedUsersCache": [
+                 "aac07d95089ce6adf08b9156d43c1a4ab594c6130b7dcb12ec199008c5819a2f"
+               ],
+               "content": "#JoininBox is a minimalistic, security focused Linux environment for #JoinMarket with a terminal based graphical menu.\n\nnostr:npub14tq8m9ggnnn2muytj9tdg0q6f26ef3snpd7ukyhvrxgq33vpnghs8shy62 👍🧡\n\nhttps://www.nobsbitcoin.com/joininbox-v0-8-0/",
+                "created_at": 1687070234,
+                "id": "c8acc12a232ea6caedfaaf0c52148635de6ffd312c3f432c6eca11720c102e54",
+                "kind": 1,
+                "pubkey": "27154fb873badf69c3ea83a0da6e65d6a150d2bf8f7320fc3314248d74645c64",
+                "sig": "e27062b1b7187ffa0b521dab23fff6c6b62c00fd1b029e28368d7d070dfb225f7e598e3b1c6b1e2335b286ec3702492bce152035105b934f594cd7323d84f0ee",
+                "tags": [
+                    [
+                "t",
+                "joininbox"
+                ],
+                [
+                    "t",
+                    "joinmarket"
+                ],
+                [
+                    "p",
+                    "aac07d95089ce6adf08b9156d43c1a4ab594c6130b7dcb12ec199008c5819a2f"
+                ]
+                ]
+        }"##;
+
+        // Deserialize
+        let event = Event::from_json(json).unwrap();
+
+        // Re-serialize
+        let re_serialized_json = event.as_json();
+
+        let expected_json: &str = r##"{"content":"#JoininBox is a minimalistic, security focused Linux environment for #JoinMarket with a terminal based graphical menu.\n\nnostr:npub14tq8m9ggnnn2muytj9tdg0q6f26ef3snpd7ukyhvrxgq33vpnghs8shy62 👍🧡\n\nhttps://www.nobsbitcoin.com/joininbox-v0-8-0/","created_at":1687070234,"id":"c8acc12a232ea6caedfaaf0c52148635de6ffd312c3f432c6eca11720c102e54","kind":1,"pubkey":"27154fb873badf69c3ea83a0da6e65d6a150d2bf8f7320fc3314248d74645c64","sig":"e27062b1b7187ffa0b521dab23fff6c6b62c00fd1b029e28368d7d070dfb225f7e598e3b1c6b1e2335b286ec3702492bce152035105b934f594cd7323d84f0ee","tags":[["t","joininbox"],["t","joinmarket"],["p","aac07d95089ce6adf08b9156d43c1a4ab594c6130b7dcb12ec199008c5819a2f"]]}"##;
+        assert_eq!(re_serialized_json, expected_json.trim());
+    }
+
+    #[test]
+    fn test_protected_event() {
+        let json: &str = r#"{"id":"cb8feca582979d91fe90455867b34dbf4d65e4b86e86b3c68c368ca9f9eef6f2","pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1707409439,"kind":1,"tags":[["-"]],"content":"hello members of the secret group","sig":"fa163f5cfb75d77d9b6269011872ee22b34fb48d23251e9879bb1e4ccbdd8aaaf4b6dc5f5084a65ef42c52fbcde8f3178bac3ba207de827ec513a6aa39fa684c"}"#;
+        let event = Event::from_json(json).unwrap();
+        assert!(event.is_protected());
+
+        // NOT protected
+        let json: &str = r#"{"content":"uRuvYr585B80L6rSJiHocw==?iv=oh6LVqdsYYol3JfFnXTbPA==","created_at":1640839235,"id":"2be17aa3031bdcb006f0fce80c146dea9c1c0268b0af2398bb673365c6444d45","kind":4,"pubkey":"f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785","sig":"a5d9290ef9659083c490b303eb7ee41356d8778ff19f2f91776c8dc4443388a64ffcf336e61af4c25c05ac3ae952d1ced889ed655b67790891222aaa15b99fdd","tags":[["p","13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"]]}"#;
+        let event = Event::from_json(json).unwrap();
+        assert!(!event.is_protected());
     }
 }
 
@@ -660,6 +714,24 @@ mod benches {
         let event = Event::from_json(json).unwrap();
         bh.iter(|| {
             black_box(event.as_json());
+        });
+    }
+
+    #[bench]
+    pub fn verify_event_id(bh: &mut Bencher) {
+        let json = r#"{"content":"uRuvYr585B80L6rSJiHocw==?iv=oh6LVqdsYYol3JfFnXTbPA==","created_at":1640839235,"id":"2be17aa3031bdcb006f0fce80c146dea9c1c0268b0af2398bb673365c6444d45","kind":4,"pubkey":"f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785","sig":"a5d9290ef9659083c490b303eb7ee41356d8778ff19f2f91776c8dc4443388a64ffcf336e61af4c25c05ac3ae952d1ced889ed655b67790891222aaa15b99fdd","tags":[["p","13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"]]}"#;
+        let event = Event::from_json(json).unwrap();
+        bh.iter(|| {
+            black_box(event.verify_id());
+        });
+    }
+
+    #[bench]
+    pub fn verify_event_sig(bh: &mut Bencher) {
+        let json = r#"{"content":"uRuvYr585B80L6rSJiHocw==?iv=oh6LVqdsYYol3JfFnXTbPA==","created_at":1640839235,"id":"2be17aa3031bdcb006f0fce80c146dea9c1c0268b0af2398bb673365c6444d45","kind":4,"pubkey":"f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785","sig":"a5d9290ef9659083c490b303eb7ee41356d8778ff19f2f91776c8dc4443388a64ffcf336e61af4c25c05ac3ae952d1ced889ed655b67790891222aaa15b99fdd","tags":[["p","13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"]]}"#;
+        let event = Event::from_json(json).unwrap();
+        bh.iter(|| {
+            black_box(event.verify_signature());
         });
     }
 }

@@ -1,14 +1,12 @@
 #!/bin/bash
 
-# Needed to exit from script on error
-set -e
+set -euo pipefail
 
 buildargs=(
     "-p nostr"
     "-p nostr-database"
     "-p nostr-relay-pool"
-    "-p nostr-signer"
-    "-p nostr-zapper"
+    "-p nostr-connect"
     "-p nwc"
     "-p nostr-sdk"
 )

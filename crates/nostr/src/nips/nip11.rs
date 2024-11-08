@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP11
+//! NIP11: Relay Information Document
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/11.md>
 
@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use std::net::SocketAddr;
 
+use reqwest::Client;
 #[cfg(not(target_arch = "wasm32"))]
 use reqwest::Proxy;
 
@@ -118,7 +119,7 @@ pub struct Limitation {
     pub max_content_length: Option<i32>,
     /// New events will require at least this difficulty of PoW,
     pub min_pow_difficulty: Option<i32>,
-    /// Relay requires NIP-42 authentication to happen before a new connection may perform any other action
+    /// Relay requires NIP42 authentication to happen before a new connection may perform any other action
     pub auth_required: Option<bool>,
     /// Relay requires payment before a new connection may perform any action
     pub payment_required: Option<bool>,
@@ -188,9 +189,7 @@ impl RelayInformationDocument {
     /// Get Relay Information Document
     ///
     /// **Proxy is ignored for WASM targets!**
-    pub async fn get(url: Url, _proxy: Option<SocketAddr>) -> Result<Self, Error> {
-        use reqwest::Client;
-
+    pub async fn get(mut url: Url, _proxy: Option<SocketAddr>) -> Result<Self, Error> {
         #[cfg(not(target_arch = "wasm32"))]
         let client: Client = {
             let mut builder = Client::builder();
@@ -204,43 +203,11 @@ impl RelayInformationDocument {
         #[cfg(target_arch = "wasm32")]
         let client: Client = Client::new();
 
-        let url = Self::with_http_scheme(url)?;
-        let req = client
-            .get(url.to_string())
-            .header("Accept", "application/nostr+json");
+        let url: &str = Self::with_http_scheme(&mut url)?;
+        let req = client.get(url).header("Accept", "application/nostr+json");
         match req.send().await {
             Ok(response) => {
                 let json: String = response.text().await?;
-                tracing::debug!("Response: {json}");
-                match serde_json::from_slice(json.as_bytes()) {
-                    Ok(json) => Ok(json),
-                    Err(_) => Err(Error::InvalidInformationDocument),
-                }
-            }
-            Err(_) => Err(Error::InaccessibleInformationDocument),
-        }
-    }
-
-    /// Get Relay Information Document
-    #[cfg(not(target_arch = "wasm32"))]
-    #[cfg(feature = "blocking")]
-    pub fn get_blocking(url: Url, proxy: Option<SocketAddr>) -> Result<Self, Error> {
-        use reqwest::blocking::Client;
-
-        let mut builder = Client::builder();
-        if let Some(proxy) = proxy {
-            let proxy = format!("socks5h://{proxy}");
-            builder = builder.proxy(Proxy::all(proxy)?);
-        }
-        let client: Client = builder.build()?;
-        let url = Self::with_http_scheme(url)?;
-        let req = client
-            .get(url.to_string())
-            .header("Accept", "application/nostr+json");
-        match req.send() {
-            Ok(response) => {
-                let json: String = response.text()?;
-                tracing::debug!("Response: {json}");
                 match serde_json::from_slice(json.as_bytes()) {
                     Ok(json) => Ok(json),
                     Err(_) => Err(Error::InvalidInformationDocument),
@@ -252,14 +219,13 @@ impl RelayInformationDocument {
 
     /// Returns new URL with scheme substituted to HTTP(S) if WS(S) was provided,
     /// other schemes leaves untouched.
-    fn with_http_scheme(url: Url) -> Result<Url, Error> {
-        let mut url = url;
+    fn with_http_scheme(url: &mut Url) -> Result<&str, Error> {
         match url.scheme() {
             "wss" => url.set_scheme("https").map_err(|_| Error::InvalidScheme)?,
             "ws" => url.set_scheme("http").map_err(|_| Error::InvalidScheme)?,
             _ => {}
         }
-        Ok(url)
+        Ok(url.as_str())
     }
 }
 
@@ -278,7 +244,7 @@ mod tests {
         let got = serde_json::to_string(&kinds).unwrap();
         let expected = "[0,1,[5,7],[40,49]]".to_string();
 
-        assert!(got == expected, "got: {}, expected: {}", got, expected);
+        assert_eq!(got, expected, "got: {}, expected: {}", got, expected);
     }
 
     #[test]
@@ -292,6 +258,6 @@ mod tests {
             RetentionKind::Range(40, 49),
         ];
 
-        assert!(got == expected, "got: {:?}, expected: {:?}", got, expected);
+        assert_eq!(got, expected, "got: {:?}, expected: {:?}", got, expected);
     }
 }

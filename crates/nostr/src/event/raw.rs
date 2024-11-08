@@ -10,8 +10,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
 
+use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr::Signature;
-use bitcoin::secp256k1::{self};
 
 use super::{id, tag};
 use crate::{key, Event, EventId, JsonUtil, Kind, PartialEvent, PublicKey, Tag, Timestamp};
@@ -77,7 +77,7 @@ pub struct RawEvent {
     /// Timestamp (seconds)
     pub created_at: u64,
     /// Kind
-    pub kind: u64,
+    pub kind: u16,
     /// Vector of strings
     pub tags: Vec<Vec<String>>,
     /// Content
@@ -101,7 +101,7 @@ impl TryFrom<RawEvent> for Event {
         let tags: Vec<Tag> = raw
             .tags
             .into_iter()
-            .map(Tag::parse)
+            .map(|t| Tag::parse(&t))
             .collect::<Result<Vec<_>, _>>()?;
         let sig: Signature = Signature::from_str(&raw.sig)?;
         Ok(Self::new(
@@ -122,11 +122,9 @@ impl TryFrom<&RawEvent> for PartialEvent {
     fn try_from(raw: &RawEvent) -> Result<Self, Self::Error> {
         let id: EventId = EventId::from_hex(&raw.id)?;
         let public_key: PublicKey = PublicKey::from_hex(&raw.pubkey)?;
-        let sig: Signature = Signature::from_str(&raw.sig)?;
         Ok(Self {
             id,
             pubkey: public_key,
-            sig,
         })
     }
 }

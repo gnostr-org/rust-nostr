@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP47
+//! NIP47: Wallet Connect
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/47.md>
 
@@ -18,7 +18,7 @@ use serde_json::Value;
 use super::nip04;
 use crate::types::url::form_urlencoded::byte_serialize;
 use crate::types::url::{ParseError, Url};
-use crate::{key, Event, JsonUtil, PublicKey, SecretKey};
+use crate::{key, Event, JsonUtil, PublicKey, SecretKey, Timestamp};
 #[cfg(feature = "std")]
 use crate::{EventBuilder, Keys, Kind, Tag};
 
@@ -227,7 +227,7 @@ pub enum Method {
 }
 
 /// Nostr Wallet Connect Request Params
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RequestParams {
     /// Pay Invoice
     PayInvoice(PayInvoiceRequestParams),
@@ -269,7 +269,7 @@ impl Serialize for RequestParams {
 }
 
 /// Pay Invoice Request Params
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PayInvoiceRequestParams {
     /// Optional id
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,14 +282,14 @@ pub struct PayInvoiceRequestParams {
 }
 
 /// Multiple Pay Invoice Request Params
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MultiPayInvoiceRequestParams {
     /// Requested invoices
     pub invoices: Vec<PayInvoiceRequestParams>,
 }
 
 /// TLVs to be added to the keysend payment
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeysendTLVRecord {
     /// TLV type
     #[serde(rename = "type")]
@@ -299,7 +299,7 @@ pub struct KeysendTLVRecord {
 }
 
 /// Pay Invoice Request Params
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PayKeysendRequestParams {
     /// Optional id
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,14 +318,14 @@ pub struct PayKeysendRequestParams {
 }
 
 /// Multiple Pay Keysend Request Params
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MultiPayKeysendRequestParams {
     /// Requested keysends
     pub keysends: Vec<PayKeysendRequestParams>,
 }
 
 /// Make Invoice Request Params
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MakeInvoiceRequestParams {
     /// Amount in millisatoshis
     pub amount: u64,
@@ -338,16 +338,16 @@ pub struct MakeInvoiceRequestParams {
 }
 
 /// Lookup Invoice Request Params
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LookupInvoiceRequestParams {
     /// Payment hash of invoice
     pub payment_hash: Option<String>,
     /// Bolt11 invoice
-    pub bolt11: Option<String>,
+    pub invoice: Option<String>,
 }
 
 /// Transaction Type
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransactionType {
     /// Incoming payments
     #[serde(rename = "incoming")]
@@ -358,14 +358,14 @@ pub enum TransactionType {
 }
 
 /// List Transactions Request Params
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ListTransactionsRequestParams {
     /// Starting timestamp in seconds since epoch
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub from: Option<u64>,
+    pub from: Option<Timestamp>,
     /// Ending timestamp in seconds since epoch
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub until: Option<u64>,
+    pub until: Option<Timestamp>,
     /// Number of invoices to return
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
@@ -382,7 +382,7 @@ pub struct ListTransactionsRequestParams {
 }
 
 /// NIP47 Request
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Request {
     /// Request method
     pub method: Method,
@@ -401,6 +401,7 @@ struct RequestTemplate {
 
 impl Request {
     /// Compose `pay_invoice` request
+    #[inline]
     pub fn pay_invoice(params: PayInvoiceRequestParams) -> Self {
         Self {
             method: Method::PayInvoice,
@@ -408,7 +409,17 @@ impl Request {
         }
     }
 
+    /// Compose `multi_pay_invoice` request
+    #[inline]
+    pub fn multi_pay_invoice(params: MultiPayInvoiceRequestParams) -> Self {
+        Self {
+            method: Method::MultiPayInvoice,
+            params: RequestParams::MultiPayInvoice(params),
+        }
+    }
+
     /// Compose `pay_keysend` request
+    #[inline]
     pub fn pay_keysend(params: PayKeysendRequestParams) -> Self {
         Self {
             method: Method::PayKeysend,
@@ -417,6 +428,7 @@ impl Request {
     }
 
     /// Compose `make_invoice` request
+    #[inline]
     pub fn make_invoice(params: MakeInvoiceRequestParams) -> Self {
         Self {
             method: Method::MakeInvoice,
@@ -425,6 +437,7 @@ impl Request {
     }
 
     /// Compose `lookup_invoice` request
+    #[inline]
     pub fn lookup_invoice(params: LookupInvoiceRequestParams) -> Self {
         Self {
             method: Method::LookupInvoice,
@@ -433,6 +446,7 @@ impl Request {
     }
 
     /// Compose `list_transactions` request
+    #[inline]
     pub fn list_transactions(params: ListTransactionsRequestParams) -> Self {
         Self {
             method: Method::ListTransactions,
@@ -441,6 +455,7 @@ impl Request {
     }
 
     /// Compose `get_balance` request
+    #[inline]
     pub fn get_balance() -> Self {
         Self {
             method: Method::GetBalance,
@@ -449,6 +464,7 @@ impl Request {
     }
 
     /// Compose `get_info` request
+    #[inline]
     pub fn get_info() -> Self {
         Self {
             method: Method::GetInfo,
@@ -510,7 +526,7 @@ impl Request {
             encrypted,
             [Tag::public_key(uri.public_key)],
         )
-        .to_event(&keys)?)
+        .sign_with_keys(&keys)?)
     }
 }
 
@@ -577,14 +593,16 @@ pub struct LookupInvoiceResponseResult {
     /// Fees paid in millisatoshis
     pub fees_paid: u64,
     /// Creation timestamp in seconds since epoch
-    pub created_at: u64,
+    pub created_at: Timestamp,
     /// Expiration timestamp in seconds since epoch
-    pub expires_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
     /// Settled timestamp in seconds since epoch
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub settled_at: Option<u64>,
+    pub settled_at: Option<Timestamp>,
     /// Optional metadata about the payment
-    pub metadata: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 /// NIP47 `get_balance` Response Result
@@ -656,7 +674,7 @@ impl Serialize for ResponseResult {
 }
 
 /// NIP47 Response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Response {
     /// Request Method
     pub result_type: Method,
@@ -679,8 +697,9 @@ struct ResponseTemplate {
 
 impl Response {
     /// Deserialize from [Event]
+    #[inline]
     pub fn from_event(uri: &NostrWalletConnectURI, event: &Event) -> Result<Self, Error> {
-        let decrypt_res: String = nip04::decrypt(&uri.secret, event.author_ref(), event.content())?;
+        let decrypt_res: String = nip04::decrypt(&uri.secret, &event.pubkey, &event.content)?;
         Self::from_json(decrypt_res)
     }
 
@@ -715,7 +734,12 @@ impl Response {
                     ResponseResult::LookupInvoice(result)
                 }
                 Method::ListTransactions => {
-                    let result: Vec<LookupInvoiceResponseResult> = serde_json::from_value(result)?;
+                    let transactions: Value =
+                        result.get("transactions").cloned().ok_or_else(|| {
+                            Error::UnexpectedResult(String::from("Missing 'transactions' field"))
+                        })?;
+                    let result: Vec<LookupInvoiceResponseResult> =
+                        serde_json::from_value(transactions)?;
                     ResponseResult::ListTransactions(result)
                 }
                 Method::GetBalance => {
@@ -848,6 +872,7 @@ impl<'de> Deserialize<'de> for Response {
     }
 }
 
+#[inline]
 fn url_encode<T>(data: T) -> String
 where
     T: AsRef<[u8]>,
@@ -873,6 +898,7 @@ pub struct NostrWalletConnectURI {
 
 impl NostrWalletConnectURI {
     /// Create new [`NostrWalletConnectURI`]
+    #[inline]
     pub fn new(
         public_key: PublicKey,
         relay_url: Url,
@@ -886,20 +912,20 @@ impl NostrWalletConnectURI {
             lud16,
         }
     }
-}
 
-impl FromStr for NostrWalletConnectURI {
-    type Err = Error;
-
-    fn from_str(uri: &str) -> Result<Self, Self::Err> {
-        let url = Url::parse(uri)?;
+    /// Parse NWC URI
+    pub fn parse<S>(uri: S) -> Result<Self, Error>
+    where
+        S: AsRef<str>,
+    {
+        let url: Url = Url::parse(uri.as_ref())?;
 
         if url.scheme() != NOSTR_WALLET_CONNECT_URI_SCHEME {
             return Err(Error::InvalidURIScheme);
         }
 
         if let Some(pubkey) = url.domain() {
-            let public_key = PublicKey::from_str(pubkey)?;
+            let public_key = PublicKey::from_hex(pubkey)?;
 
             let mut relay_url: Option<Url> = None;
             let mut secret: Option<SecretKey> = None;
@@ -908,12 +934,10 @@ impl FromStr for NostrWalletConnectURI {
             for (key, value) in url.query_pairs() {
                 match key {
                     Cow::Borrowed("relay") => {
-                        let value = value.to_string();
-                        relay_url = Some(Url::parse(&value)?);
+                        relay_url = Some(Url::parse(value.as_ref())?);
                     }
                     Cow::Borrowed("secret") => {
-                        let value = value.to_string();
-                        secret = Some(SecretKey::from_str(&value)?);
+                        secret = Some(SecretKey::from_hex(value.as_ref())?);
                     }
                     Cow::Borrowed("lud16") => {
                         lud16 = Some(value.to_string());
@@ -922,19 +946,25 @@ impl FromStr for NostrWalletConnectURI {
                 }
             }
 
-            if let Some(relay_url) = relay_url {
-                if let Some(secret) = secret {
-                    return Ok(Self {
-                        public_key,
-                        relay_url,
-                        secret,
-                        lud16,
-                    });
-                }
+            if let (Some(relay_url), Some(secret)) = (relay_url, secret) {
+                return Ok(Self {
+                    public_key,
+                    relay_url,
+                    secret,
+                    lud16,
+                });
             }
         }
 
         Err(Error::InvalidURI)
+    }
+}
+
+impl FromStr for NostrWalletConnectURI {
+    type Err = Error;
+
+    fn from_str(uri: &str) -> Result<Self, Self::Err> {
+        Self::parse(uri)
     }
 }
 
@@ -1051,5 +1081,48 @@ mod tests {
         } else {
             panic!("Invalid request params");
         }
+    }
+
+    #[test]
+    fn test_parse_list_transactions_result() {
+        let json = r#"{
+            "result_type": "list_transactions",
+            "result": {
+                "transactions": [
+                    {
+                       "type": "incoming",
+                       "invoice": "abcd",
+                       "description": "string",
+                       "payment_hash": "",
+                       "amount": 123,
+                       "fees_paid": 1,
+                       "created_at": 123456,
+                       "expires_at": 1234567
+                   }
+                ]
+            }
+        }"#;
+        let result = Response::from_json(json).unwrap();
+        assert_eq!(result.result_type, Method::ListTransactions);
+        assert!(result.error.is_none());
+        assert_eq!(
+            result.result,
+            Some(ResponseResult::ListTransactions(vec![
+                LookupInvoiceResponseResult {
+                    transaction_type: Some(TransactionType::Incoming),
+                    invoice: Some(String::from("abcd")),
+                    description: Some(String::from("string")),
+                    amount: 123,
+                    fees_paid: 1,
+                    created_at: Timestamp::from(123456),
+                    expires_at: Some(Timestamp::from(1234567)),
+                    description_hash: None,
+                    payment_hash: String::new(),
+                    metadata: None,
+                    settled_at: None,
+                    preimage: None
+                }
+            ]))
+        )
     }
 }

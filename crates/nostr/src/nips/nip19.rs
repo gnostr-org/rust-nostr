@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP19
+//! NIP19: bech32-encoded entities
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/19.md>
 
@@ -11,12 +11,13 @@
 use alloc::string::{FromUtf8Error, String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
-use core::str::FromStr;
+use core::str::{self, FromStr, Utf8Error};
 
-use bitcoin::bech32::{self, FromBase32, ToBase32, Variant};
-use bitcoin::hashes::Hash;
+use bech32::{self, Bech32, Hrp};
 
 use super::nip01::Coordinate;
+#[cfg(all(feature = "std", feature = "nip05"))]
+use super::nip05::Nip05Profile;
 #[cfg(feature = "nip49")]
 use super::nip49::{self, EncryptedSecretKey};
 use crate::event::id::{self, EventId};
@@ -29,24 +30,45 @@ pub const PREFIX_BECH32_PUBLIC_KEY: &str = "npub";
 pub const PREFIX_BECH32_NOTE_ID: &str = "note";
 pub const PREFIX_BECH32_PROFILE: &str = "nprofile";
 pub const PREFIX_BECH32_EVENT: &str = "nevent";
-pub const PREFIX_BECH32_PARAMETERIZED_REPLACEABLE_EVENT: &str = "naddr";
+pub const PREFIX_BECH32_COORDINATE: &str = "naddr";
+
+const HRP_SECRET_KEY: Hrp = Hrp::parse_unchecked(PREFIX_BECH32_SECRET_KEY);
+#[cfg(feature = "nip49")]
+const HRP_SECRET_KEY_ENCRYPTED: Hrp = Hrp::parse_unchecked(PREFIX_BECH32_SECRET_KEY_ENCRYPTED);
+const HRP_PUBLIC_KEY: Hrp = Hrp::parse_unchecked(PREFIX_BECH32_PUBLIC_KEY);
+const HRP_NOTE_ID: Hrp = Hrp::parse_unchecked(PREFIX_BECH32_NOTE_ID);
+const HRP_PROFILE: Hrp = Hrp::parse_unchecked(PREFIX_BECH32_PROFILE);
+const HRP_EVENT: Hrp = Hrp::parse_unchecked(PREFIX_BECH32_EVENT);
+const HRP_COORDINATE: Hrp = Hrp::parse_unchecked(PREFIX_BECH32_COORDINATE);
 
 pub const SPECIAL: u8 = 0;
 pub const RELAY: u8 = 1;
 pub const AUTHOR: u8 = 2;
 pub const KIND: u8 = 3;
 
+/// 1 (type) + 1 (len) + 32 (value)
+const FIXED_1_1_32_BYTES_TVL: usize = 1 + 1 + 32;
+
+/// 1 (type) + 1 (len) + 4 (value - 32-bit unsigned number)
+const FIXED_KIND_BYTES_TVL: usize = 1 + 1 + 4;
+
 /// `NIP19` error
 #[derive(Debug, Eq, PartialEq)]
 pub enum Error {
+    /// Fmt error.
+    Fmt(fmt::Error),
     /// Url parse error
     Url(url::ParseError),
-    /// Bech32 error.
-    Bech32(bech32::Error),
+    /// Bech32 decode error.
+    Bech32Decode(bech32::DecodeError),
+    /// Bech32 encode error
+    Bech32Encode(bech32::EncodeError),
     /// UFT-8 error
-    UTF8(FromUtf8Error),
+    FromUTF8(FromUtf8Error),
+    /// UFT-8 error
+    UTF8(Utf8Error),
     /// Hash error
-    Hash(bitcoin::hashes::Error),
+    Hash(bitcoin::hashes::FromSliceError),
     /// Keys error
     Keys(key::Error),
     /// EventId error
@@ -56,8 +78,6 @@ pub enum Error {
     NIP49(nip49::Error),
     /// Wrong prefix or variant
     WrongPrefixOrVariant,
-    /// Not implemented
-    NotImplemented,
     /// Field missing
     FieldMissing(String),
     /// TLV error
@@ -72,8 +92,11 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Fmt(e) => write!(f, "{e}"),
             Self::Url(e) => write!(f, "Url: {e}"),
-            Self::Bech32(e) => write!(f, "Bech32: {e}"),
+            Self::Bech32Decode(e) => write!(f, "{e}"),
+            Self::Bech32Encode(e) => write!(f, "{e}"),
+            Self::FromUTF8(e) => write!(f, "UTF8: {e}"),
             Self::UTF8(e) => write!(f, "UTF8: {e}"),
             Self::Hash(e) => write!(f, "Hash: {e}"),
             Self::Keys(e) => write!(f, "Keys: {e}"),
@@ -84,8 +107,13 @@ impl fmt::Display for Error {
             Self::FieldMissing(name) => write!(f, "Field missing: {name}"),
             Self::TLV => write!(f, "TLV (type-length-value) error"),
             Self::TryFromSlice => write!(f, "Impossible to perform conversion from slice"),
-            Self::NotImplemented => write!(f, "Not implemented"),
         }
+    }
+}
+
+impl From<fmt::Error> for Error {
+    fn from(e: fmt::Error) -> Self {
+        Self::Fmt(e)
     }
 }
 
@@ -95,21 +123,27 @@ impl From<url::ParseError> for Error {
     }
 }
 
-impl From<bech32::Error> for Error {
-    fn from(e: bech32::Error) -> Self {
-        Self::Bech32(e)
+impl From<bech32::DecodeError> for Error {
+    fn from(e: bech32::DecodeError) -> Self {
+        Self::Bech32Decode(e)
+    }
+}
+
+impl From<bech32::EncodeError> for Error {
+    fn from(e: bech32::EncodeError) -> Self {
+        Self::Bech32Encode(e)
     }
 }
 
 impl From<FromUtf8Error> for Error {
     fn from(e: FromUtf8Error) -> Self {
-        Self::UTF8(e)
+        Self::FromUTF8(e)
     }
 }
 
-impl From<bitcoin::hashes::Error> for Error {
-    fn from(e: bitcoin::hashes::Error) -> Self {
-        Self::Hash(e)
+impl From<Utf8Error> for Error {
+    fn from(e: Utf8Error) -> Self {
+        Self::UTF8(e)
     }
 }
 
@@ -151,7 +185,6 @@ enum Nip19Prefix {
     NAddr,
 }
 
-/// Convert NIP19 prefixes to [`Nip19Prefix`]
 impl FromStr for Nip19Prefix {
     type Err = Error;
 
@@ -164,7 +197,7 @@ impl FromStr for Nip19Prefix {
             PREFIX_BECH32_NOTE_ID => Ok(Nip19Prefix::Note),
             PREFIX_BECH32_PROFILE => Ok(Nip19Prefix::NProfile),
             PREFIX_BECH32_EVENT => Ok(Nip19Prefix::NEvent),
-            PREFIX_BECH32_PARAMETERIZED_REPLACEABLE_EVENT => Ok(Nip19Prefix::NAddr),
+            PREFIX_BECH32_COORDINATE => Ok(Nip19Prefix::NAddr),
             _ => Err(Error::WrongPrefixOrVariant),
         }
     }
@@ -194,7 +227,7 @@ pub enum Nip19 {
 
 pub trait FromBech32: Sized {
     type Err;
-    fn from_bech32<S>(s: S) -> Result<Self, Self::Err>
+    fn from_bech32<S>(bech32: S) -> Result<Self, Self::Err>
     where
         S: AsRef<str>;
 }
@@ -211,14 +244,8 @@ impl FromBech32 for Nip19 {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(hash.as_ref())?;
-        let prefix: Nip19Prefix = Nip19Prefix::from_str(&hrp)?;
-
-        if checksum != Variant::Bech32 {
-            return Err(Error::WrongPrefixOrVariant);
-        }
-
-        let data: Vec<u8> = Vec::<u8>::from_base32(&data)?;
+        let (hrp, data) = bech32::decode(hash.as_ref())?;
+        let prefix: Nip19Prefix = Nip19Prefix::from_str(&hrp.to_string())?;
 
         match prefix {
             Nip19Prefix::NSec => Ok(Self::Secret(SecretKey::from_slice(data.as_slice())?)),
@@ -259,13 +286,12 @@ impl FromBech32 for SecretKey {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(secret_key.as_ref())?;
+        let (hrp, data) = bech32::decode(secret_key.as_ref())?;
 
-        if hrp != PREFIX_BECH32_SECRET_KEY || checksum != Variant::Bech32 {
+        if hrp != HRP_SECRET_KEY {
             return Err(Error::WrongPrefixOrVariant);
         }
 
-        let data = Vec::<u8>::from_base32(&data)?;
         Ok(Self::from_slice(data.as_slice())?)
     }
 }
@@ -273,12 +299,11 @@ impl FromBech32 for SecretKey {
 impl ToBech32 for SecretKey {
     type Err = Error;
 
+    #[inline]
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        let data = self.secret_bytes().to_base32();
-        Ok(bech32::encode(
-            PREFIX_BECH32_SECRET_KEY,
-            data,
-            Variant::Bech32,
+        Ok(bech32::encode::<Bech32>(
+            HRP_SECRET_KEY,
+            self.as_secret_bytes(),
         )?)
     }
 }
@@ -291,13 +316,12 @@ impl FromBech32 for EncryptedSecretKey {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(secret_key.as_ref())?;
+        let (hrp, data) = bech32::decode(secret_key.as_ref())?;
 
-        if hrp != PREFIX_BECH32_SECRET_KEY_ENCRYPTED || checksum != Variant::Bech32 {
+        if hrp != HRP_SECRET_KEY_ENCRYPTED {
             return Err(Error::WrongPrefixOrVariant);
         }
 
-        let data = Vec::<u8>::from_base32(&data)?;
         Ok(Self::from_slice(data.as_slice())?)
     }
 }
@@ -306,12 +330,11 @@ impl FromBech32 for EncryptedSecretKey {
 impl ToBech32 for EncryptedSecretKey {
     type Err = Error;
 
+    #[inline]
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        let data = self.as_vec().to_base32();
-        Ok(bech32::encode(
-            PREFIX_BECH32_SECRET_KEY_ENCRYPTED,
-            data,
-            Variant::Bech32,
+        Ok(bech32::encode::<Bech32>(
+            HRP_SECRET_KEY_ENCRYPTED,
+            &self.as_vec(),
         )?)
     }
 }
@@ -323,13 +346,12 @@ impl FromBech32 for PublicKey {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(public_key.as_ref())?;
+        let (hrp, data) = bech32::decode(public_key.as_ref())?;
 
-        if hrp != PREFIX_BECH32_PUBLIC_KEY || checksum != Variant::Bech32 {
+        if hrp != HRP_PUBLIC_KEY {
             return Err(Error::WrongPrefixOrVariant);
         }
 
-        let data = Vec::<u8>::from_base32(&data)?;
         Ok(Self::from_slice(data.as_slice())?)
     }
 }
@@ -337,13 +359,9 @@ impl FromBech32 for PublicKey {
 impl ToBech32 for PublicKey {
     type Err = Error;
 
+    #[inline]
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        let data = self.serialize().to_base32();
-        Ok(bech32::encode(
-            PREFIX_BECH32_PUBLIC_KEY,
-            data,
-            Variant::Bech32,
-        )?)
+        Ok(bech32::encode::<Bech32>(HRP_PUBLIC_KEY, &self.serialize())?)
     }
 }
 
@@ -354,13 +372,12 @@ impl FromBech32 for EventId {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(hash.as_ref())?;
+        let (hrp, data) = bech32::decode(hash.as_ref())?;
 
-        if hrp != PREFIX_BECH32_NOTE_ID || checksum != Variant::Bech32 {
+        if hrp != HRP_NOTE_ID {
             return Err(Error::WrongPrefixOrVariant);
         }
 
-        let data: Vec<u8> = Vec::<u8>::from_base32(&data)?;
         Ok(Self::from_slice(data.as_slice())?)
     }
 }
@@ -368,13 +385,9 @@ impl FromBech32 for EventId {
 impl ToBech32 for EventId {
     type Err = Error;
 
+    #[inline]
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        let data = self.to_base32();
-        Ok(bech32::encode(
-            PREFIX_BECH32_NOTE_ID,
-            data,
-            Variant::Bech32,
-        )?)
+        Ok(bech32::encode::<Bech32>(HRP_NOTE_ID, self.as_bytes())?)
     }
 }
 
@@ -382,10 +395,12 @@ impl ToBech32 for EventId {
 pub struct Nip19Event {
     pub event_id: EventId,
     pub author: Option<PublicKey>,
+    pub kind: Option<Kind>,
     pub relays: Vec<String>,
 }
 
 impl Nip19Event {
+    #[inline]
     pub fn new<I, S>(event_id: EventId, relays: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -394,13 +409,29 @@ impl Nip19Event {
         Self {
             event_id,
             author: None,
+            kind: None,
             relays: relays.into_iter().map(|u| u.into()).collect(),
         }
+    }
+
+    /// Add author
+    #[inline]
+    pub fn author(mut self, author: PublicKey) -> Self {
+        self.author = Some(author);
+        self
+    }
+
+    /// Add kind
+    #[inline]
+    pub fn kind(mut self, kind: Kind) -> Self {
+        self.kind = Some(kind);
+        self
     }
 
     fn from_bech32_data(mut data: Vec<u8>) -> Result<Self, Error> {
         let mut event_id: Option<EventId> = None;
         let mut author: Option<PublicKey> = None;
+        let mut kind: Option<Kind> = None;
         let mut relays: Vec<String> = Vec::new();
 
         while !data.is_empty() {
@@ -420,11 +451,21 @@ impl Nip19Event {
                 // the pubkey of the event"
                 AUTHOR => {
                     if author.is_none() {
-                        author = Some(PublicKey::from_slice(bytes)?);
+                        author = PublicKey::from_slice(bytes).ok(); // NOT propagate error if public key is invalid
                     }
                 }
                 RELAY => {
                     relays.push(String::from_utf8(bytes.to_vec())?);
+                }
+                KIND => {
+                    if kind.is_none() {
+                        // The kind value must be a 32-bit unsigned number according to
+                        // https://github.com/nostr-protocol/nips/blob/37f6cbb775126b386414220f783ca0f5f85e7614/19.md#shareable-identifiers-with-extra-metadata
+                        let k: u16 =
+                            u32::from_be_bytes(bytes.try_into().map_err(|_| Error::TryFromSlice)?)
+                                as u16;
+                        kind = Some(Kind::from(k));
+                    }
                 }
                 _ => (),
             };
@@ -435,6 +476,7 @@ impl Nip19Event {
         Ok(Self {
             event_id: event_id.ok_or_else(|| Error::FieldMissing("event id".to_string()))?,
             author,
+            kind,
             relays,
         })
     }
@@ -447,13 +489,12 @@ impl FromBech32 for Nip19Event {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(s.as_ref())?;
+        let (hrp, data) = bech32::decode(s.as_ref())?;
 
-        if hrp != PREFIX_BECH32_EVENT || checksum != Variant::Bech32 {
+        if hrp != HRP_EVENT {
             return Err(Error::WrongPrefixOrVariant);
         }
 
-        let data: Vec<u8> = Vec::from_base32(&data)?;
         Self::from_bech32_data(data)
     }
 }
@@ -462,16 +503,54 @@ impl ToBech32 for Nip19Event {
     type Err = Error;
 
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        let mut bytes: Vec<u8> = vec![SPECIAL, 32];
-        bytes.extend(self.event_id.inner().as_byte_array());
+        // Allocate capacity
+        let relays_len: usize = self.relays.iter().map(|u| 2 + u.len()).sum();
+        let author_len: usize = if self.author.is_some() {
+            FIXED_1_1_32_BYTES_TVL
+        } else {
+            0
+        };
+        let mut bytes: Vec<u8> =
+            Vec::with_capacity(FIXED_1_1_32_BYTES_TVL + author_len + relays_len);
 
-        for relay in self.relays.iter() {
-            bytes.extend([RELAY, relay.len() as u8]);
-            bytes.extend(relay.as_bytes());
+        bytes.push(SPECIAL); // Type
+        bytes.push(32); // Len
+        bytes.extend(self.event_id.as_bytes()); // Value
+
+        if let Some(author) = &self.author {
+            bytes.push(AUTHOR); // Type
+            bytes.push(32); // Len
+            bytes.extend(author.to_bytes()); // Value
         }
 
-        let data = bytes.to_base32();
-        Ok(bech32::encode(PREFIX_BECH32_EVENT, data, Variant::Bech32)?)
+        if let Some(kind) = &self.kind {
+            bytes.push(KIND); // Type
+            bytes.push(4); // Len
+            bytes.extend((kind.as_u16() as u32).to_be_bytes()); // Value
+        }
+
+        for relay in self.relays.iter() {
+            bytes.push(RELAY); // Type
+            bytes.push(relay.len() as u8); // Len
+            bytes.extend(relay.as_bytes()); // Value
+        }
+
+        Ok(bech32::encode::<Bech32>(HRP_EVENT, &bytes)?)
+    }
+}
+
+#[cfg(all(feature = "std", feature = "nip05"))]
+impl ToBech32 for Nip05Profile {
+    type Err = Error;
+
+    fn to_bech32(&self) -> Result<String, Self::Err> {
+        // Convert to NIP19 profile
+        let profile: Nip19Profile = Nip19Profile {
+            public_key: self.public_key,
+            relays: self.relays.clone(),
+        };
+        // Encode
+        profile.to_bech32()
     }
 }
 
@@ -482,6 +561,7 @@ pub struct Nip19Profile {
 }
 
 impl Nip19Profile {
+    #[inline]
     pub fn new<I, U>(public_key: PublicKey, relays: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = U>,
@@ -536,20 +616,22 @@ impl ToBech32 for Nip19Profile {
     type Err = Error;
 
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        let mut bytes: Vec<u8> = vec![SPECIAL, 32];
-        bytes.extend(self.public_key.serialize());
+        // Allocate capacity
+        let relays_len: usize = self.relays.iter().map(|u| 2 + u.as_str().len()).sum();
+        let mut bytes: Vec<u8> = Vec::with_capacity(FIXED_1_1_32_BYTES_TVL + relays_len);
+
+        bytes.push(SPECIAL); // Type
+        bytes.push(32); // Len
+        bytes.extend(self.public_key.to_bytes()); // Value
 
         for relay in self.relays.iter() {
-            bytes.extend([RELAY, relay.as_str().len() as u8]);
-            bytes.extend(relay.as_ref().as_bytes());
+            let url: &[u8] = relay.as_str().as_bytes();
+            bytes.push(RELAY); // Type
+            bytes.push(url.len() as u8); // Len
+            bytes.extend(url); // Value
         }
 
-        let data = bytes.to_base32();
-        Ok(bech32::encode(
-            PREFIX_BECH32_PROFILE,
-            data,
-            Variant::Bech32,
-        )?)
+        Ok(bech32::encode::<Bech32>(HRP_PROFILE, &bytes)?)
     }
 }
 
@@ -560,13 +642,12 @@ impl FromBech32 for Nip19Profile {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(s.as_ref())?;
+        let (hrp, data) = bech32::decode(s.as_ref())?;
 
-        if hrp != PREFIX_BECH32_PROFILE || checksum != Variant::Bech32 {
+        if hrp != HRP_PROFILE {
             return Err(Error::WrongPrefixOrVariant);
         }
 
-        let data: Vec<u8> = Vec::from_base32(&data)?;
         Self::from_bech32_data(data)
     }
 }
@@ -601,9 +682,11 @@ impl Coordinate {
                 }
                 KIND => {
                     if kind.is_none() {
-                        let k: u64 =
+                        // The kind value must be a 32-bit unsigned number according to
+                        // https://github.com/nostr-protocol/nips/blob/37f6cbb775126b386414220f783ca0f5f85e7614/19.md#shareable-identifiers-with-extra-metadata
+                        let k: u16 =
                             u32::from_be_bytes(bytes.try_into().map_err(|_| Error::TryFromSlice)?)
-                                as u64;
+                                as u16;
                         kind = Some(Kind::from(k));
                     }
                 }
@@ -629,13 +712,12 @@ impl FromBech32 for Coordinate {
     where
         S: AsRef<str>,
     {
-        let (hrp, data, checksum) = bech32::decode(s.as_ref())?;
+        let (hrp, data) = bech32::decode(s.as_ref())?;
 
-        if hrp != PREFIX_BECH32_PARAMETERIZED_REPLACEABLE_EVENT || checksum != Variant::Bech32 {
+        if hrp != HRP_COORDINATE {
             return Err(Error::WrongPrefixOrVariant);
         }
 
-        let data: Vec<u8> = Vec::from_base32(&data)?;
         Self::from_bech32_data(data)
     }
 }
@@ -644,31 +726,35 @@ impl ToBech32 for Coordinate {
     type Err = Error;
 
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        let mut bytes: Vec<u8> = Vec::new();
+        // Allocate capacity
+        let identifier_len: usize = 2 + self.identifier.len();
+        let relays_len: usize = self.relays.iter().map(|u| 2 + u.len()).sum();
+        let mut bytes: Vec<u8> = Vec::with_capacity(
+            identifier_len + FIXED_1_1_32_BYTES_TVL + FIXED_KIND_BYTES_TVL + relays_len,
+        );
 
         // Identifier
-        bytes.extend([SPECIAL, self.identifier.len() as u8]);
-        bytes.extend(self.identifier.as_bytes());
-
-        for relay in self.relays.iter() {
-            bytes.extend([RELAY, relay.len() as u8]);
-            bytes.extend(relay.as_bytes());
-        }
+        bytes.push(SPECIAL); // Type
+        bytes.push(self.identifier.len() as u8); // Len
+        bytes.extend(self.identifier.as_bytes()); // Value
 
         // Author
-        bytes.extend([AUTHOR, 32]);
-        bytes.extend(self.public_key.serialize());
+        bytes.push(AUTHOR); // Type
+        bytes.push(32); // Len
+        bytes.extend(self.public_key.to_bytes()); // Value
 
         // Kind
-        bytes.extend([KIND, 4]);
-        bytes.extend(self.kind.as_u32().to_be_bytes());
+        bytes.push(KIND); // Type
+        bytes.push(4); // Len
+        bytes.extend((self.kind.as_u16() as u32).to_be_bytes()); // Value
 
-        let data = bytes.to_base32();
-        Ok(bech32::encode(
-            PREFIX_BECH32_PARAMETERIZED_REPLACEABLE_EVENT,
-            data,
-            Variant::Bech32,
-        )?)
+        for relay in self.relays.iter() {
+            bytes.push(RELAY); // Type
+            bytes.push(relay.len() as u8); // Len
+            bytes.extend(relay.as_bytes()); // Value
+        }
+
+        Ok(bech32::encode::<Bech32>(HRP_COORDINATE, &bytes)?)
     }
 }
 
@@ -726,15 +812,18 @@ mod tests {
 
     #[test]
     fn from_bech32_nip19_profile() {
-        let expected_pubkey =
-            PublicKey::from_str("32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245")
-                .unwrap();
-
-        let nprofile = "nprofile1qqsr9cvzwc652r4m83d86ykplrnm9dg5gwdvzzn8ameanlvut35wy3gpz4mhxue69uhhyetvv9ujuerpd46hxtnfduhsz4nxck";
+        let nprofile = "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gppemhxue69uhhytnc9e3k7mf0qyt8wumn8ghj7er2vfshxtnnv9jxkc3wvdhk6tclr7lsh";
         let nip19 = Nip19::from_bech32(nprofile).unwrap();
 
+        let expected_pubkey =
+            PublicKey::from_str("3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d")
+                .unwrap();
+
         assert_eq!(
-            Nip19::Profile(Nip19Profile::new(expected_pubkey, ["wss://relay.damus.io/"]).unwrap()),
+            Nip19::Profile(
+                Nip19Profile::new(expected_pubkey, ["wss://r.x.com", "wss://djbas.sadkb.com"])
+                    .unwrap()
+            ),
             nip19
         );
 
@@ -742,12 +831,73 @@ mod tests {
     }
 
     #[test]
-    fn from_bech32_nevent_author() {
+    fn test_bech32_nevent() {
+        let nevent = "nevent1qqsdhet4232flykq3048jzc9msmaa3hnxuesxy3lnc33vd0wt9xwk6szyqewrqnkx4zsaweutf739s0cu7et29zrntqs5elw70vlm8zudr3y24sqsgy";
+        let nip19_event = Nip19Event::from_bech32(nevent).unwrap();
+
         let expected_pubkey =
             PublicKey::from_str("32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245")
                 .unwrap();
-        let nevent = "nevent1qqsdhet4232flykq3048jzc9msmaa3hnxuesxy3lnc33vd0wt9xwk6szyqewrqnkx4zsaweutf739s0cu7et29zrntqs5elw70vlm8zudr3y24sqsgy";
-        let event = Nip19Event::from_bech32(nevent).unwrap();
-        assert_eq!(event.author, Some(expected_pubkey));
+
+        assert_eq!(nip19_event.author, Some(expected_pubkey));
+        assert_eq!(nip19_event.kind, None);
+        assert_eq!(nip19_event.to_bech32().unwrap(), nevent);
+
+        // Test serialization and deserialization
+        let event = Nip19Event {
+            event_id: EventId::from_hex(
+                "d94a3f4dd87b9a3b0bed183b32e916fa29c8020107845d1752d72697fe5309a5",
+            )
+            .unwrap(),
+            author: None,
+            kind: Some(Kind::TextNote),
+            relays: Vec::new(),
+        };
+        let serialized = event.to_bech32().unwrap();
+        assert_eq!(event, Nip19Event::from_bech32(serialized).unwrap());
+    }
+
+    #[test]
+    fn from_bech32_naddr() {
+        let coordinate: &str = "naddr1qqxnzd3exgersv33xymnsve3qgs8suecw4luyht9ekff89x4uacneapk8r5dyk0gmn6uwwurf6u9rusrqsqqqa282m3gxt";
+        let coordinate: Coordinate = Coordinate::from_bech32(coordinate).unwrap();
+
+        let expected_pubkey: PublicKey =
+            PublicKey::from_hex("787338757fc25d65cd929394d5e7713cf43638e8d259e8dcf5c73b834eb851f2")
+                .unwrap();
+        let expected_kind: Kind = Kind::LongFormTextNote;
+        let exected_identifier: &str = "1692282117831";
+
+        assert_eq!(coordinate.public_key, expected_pubkey);
+        assert_eq!(coordinate.kind, expected_kind);
+        assert_eq!(coordinate.identifier, exected_identifier);
+    }
+
+    #[test]
+    fn test_parse_nevent_with_malformed_public_key() {
+        let event = Nip19Event::from_bech32("nevent1qqsqye53g5jg5pzw87q6a3nstkf2wu7jph87nala2nvfyw5u3ewlhfspr9mhxue69uhkymmnw3ezumr9vd682unfveujumn9wspyqve5xasnyvehxqunqvryxyukydr9xsmn2d3jxgcn2wf5v5uxyerpxucrvct9x43nwwp4v3jnqwt9x5uk2dpkxq6kvwf3vycrxe35893ska2ytu").unwrap();
+        assert!(event.author.is_none());
+    }
+}
+
+#[cfg(bench)]
+mod benches {
+    use super::*;
+    use crate::test::{black_box, Bencher};
+
+    #[bench]
+    pub fn to_bech32_nevent(bh: &mut Bencher) {
+        let event_id =
+            EventId::from_hex("d94a3f4dd87b9a3b0bed183b32e916fa29c8020107845d1752d72697fe5309a5")
+                .unwrap();
+        let public_key =
+            PublicKey::from_str("32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245")
+                .unwrap();
+        let nip19_event = Nip19Event::new(event_id, ["wss://r.x.com", "wss://djbas.sadkb.com"])
+            .author(public_key);
+
+        bh.iter(|| {
+            black_box(nip19_event.to_bech32()).unwrap();
+        });
     }
 }

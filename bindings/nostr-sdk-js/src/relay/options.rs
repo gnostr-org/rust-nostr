@@ -4,18 +4,115 @@
 
 use core::ops::Deref;
 
-use nostr_sdk::{
-    FilterOptions, NegentropyDirection, NegentropyOptions, SubscribeAutoCloseOptions,
-    SubscribeOptions,
-};
+use nostr_sdk::prelude::*;
 use wasm_bindgen::prelude::*;
 
+use super::filtering::JsRelayFilteringMode;
+use super::flags::JsRelayServiceFlags;
+use super::limits::JsRelayLimits;
 use crate::duration::JsDuration;
+
+/// `Relay` options
+#[wasm_bindgen(js_name = RelayOptions)]
+pub struct JsRelayOptions {
+    inner: RelayOptions,
+}
+
+impl Deref for JsRelayOptions {
+    type Target = RelayOptions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl From<RelayOptions> for JsRelayOptions {
+    fn from(inner: RelayOptions) -> Self {
+        Self { inner }
+    }
+}
+
+#[wasm_bindgen(js_class = RelayOptions)]
+impl JsRelayOptions {
+    /// New default relay options
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: RelayOptions::new(),
+        }
+    }
+
+    /// Set Relay Service Flags
+    pub fn flags(self, flags: &JsRelayServiceFlags) -> Self {
+        self.inner.flags(**flags).into()
+    }
+
+    /// Set read flag
+    pub fn read(self, read: bool) -> Self {
+        self.inner.read(read).into()
+    }
+
+    /// Set write flag
+    pub fn write(self, write: bool) -> Self {
+        self.inner.write(write).into()
+    }
+
+    /// Set ping flag
+    pub fn ping(self, ping: bool) -> Self {
+        self.inner.ping(ping).into()
+    }
+
+    /// Minimum POW for received events (default: 0)
+    pub fn pow(self, difficulty: u8) -> Self {
+        self.inner.pow(difficulty).into()
+    }
+
+    /// Update `pow` option
+    pub fn update_pow_difficulty(&self, difficulty: u8) {
+        self.inner.update_pow_difficulty(difficulty);
+    }
+
+    /// Enable/disable auto reconnection (default: true)
+    pub fn reconnect(self, reconnect: bool) -> Self {
+        self.inner.reconnect(reconnect).into()
+    }
+
+    /// Retry connection time (default: 10 sec)
+    ///
+    /// Are allowed values `>=` 5 secs
+    pub fn retry_sec(self, retry_sec: u64) -> Self {
+        self.inner.retry_sec(retry_sec).into()
+    }
+
+    /// Automatically adjust retry seconds based on success/attempts (default: true)
+    pub fn adjust_retry_sec(self, adjust_retry_sec: bool) -> Self {
+        self.inner.adjust_retry_sec(adjust_retry_sec).into()
+    }
+
+    /// Set custom limits
+    pub fn limits(self, limits: &JsRelayLimits) -> Self {
+        self.inner.limits(limits.deref().clone()).into()
+    }
+
+    /// Set filtering mode (default: blacklist)
+    #[wasm_bindgen(js_name = filteringMode)]
+    pub fn filtering_mode(self, mode: JsRelayFilteringMode) -> Self {
+        self.inner.filtering_mode(mode.into()).into()
+    }
+}
 
 /// Filter options
 #[wasm_bindgen(js_name = FilterOptions)]
 pub struct JsFilterOptions {
     inner: FilterOptions,
+}
+
+impl Deref for JsFilterOptions {
+    type Target = FilterOptions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 #[wasm_bindgen(js_class = FilterOptions)]
@@ -118,58 +215,51 @@ impl JsSubscribeOptions {
     pub fn close_on(self, opts: Option<JsSubscribeAutoCloseOptions>) -> Self {
         self.inner.close_on(opts.map(|o| *o)).into()
     }
-
-    /* /// Set [RelaySendOptions]
-    pub fn send_opts(self, opts: JsRelaySendOptions) -> Self {
-        let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.send_opts(**opts);
-        builder
-    } */
 }
 
-#[wasm_bindgen(js_name = NegentropyDirection)]
-pub enum JsNegentropyDirection {
+#[wasm_bindgen(js_name = SyncDirection)]
+pub enum JsSyncDirection {
     Up,
     Down,
     Both,
 }
 
-impl From<JsNegentropyDirection> for NegentropyDirection {
-    fn from(value: JsNegentropyDirection) -> Self {
+impl From<JsSyncDirection> for SyncDirection {
+    fn from(value: JsSyncDirection) -> Self {
         match value {
-            JsNegentropyDirection::Up => Self::Up,
-            JsNegentropyDirection::Down => Self::Down,
-            JsNegentropyDirection::Both => Self::Both,
+            JsSyncDirection::Up => Self::Up,
+            JsSyncDirection::Down => Self::Down,
+            JsSyncDirection::Both => Self::Both,
         }
     }
 }
 
-#[wasm_bindgen(js_name = NegentropyOptions)]
-pub struct JsNegentropyOptions {
-    inner: NegentropyOptions,
+#[wasm_bindgen(js_name = SyncOptions)]
+pub struct JsSyncOptions {
+    inner: SyncOptions,
 }
 
-impl Deref for JsNegentropyOptions {
-    type Target = NegentropyOptions;
+impl Deref for JsSyncOptions {
+    type Target = SyncOptions;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl From<NegentropyOptions> for JsNegentropyOptions {
-    fn from(inner: NegentropyOptions) -> Self {
+impl From<SyncOptions> for JsSyncOptions {
+    fn from(inner: SyncOptions) -> Self {
         Self { inner }
     }
 }
 
-#[wasm_bindgen(js_class = NegentropyOptions)]
-impl JsNegentropyOptions {
+#[wasm_bindgen(js_class = SyncOptions)]
+impl JsSyncOptions {
     /// New default options
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: NegentropyOptions::new(),
+            inner: SyncOptions::new(),
         }
     }
 
@@ -179,8 +269,16 @@ impl JsNegentropyOptions {
         self.inner.initial_timeout(*timeout).into()
     }
 
-    /// Negentropy Sync direction (default: down)
-    pub fn direction(self, direction: JsNegentropyDirection) -> Self {
+    /// Sync direction (default: down)
+    pub fn direction(self, direction: JsSyncDirection) -> Self {
         self.inner.direction(direction.into()).into()
+    }
+
+    /// Dry run
+    ///
+    /// Just check what event are missing: execute reconciliation but WITHOUT
+    /// getting/sending full events.
+    pub fn dry_run(self) -> Self {
+        self.inner.dry_run().into()
     }
 }

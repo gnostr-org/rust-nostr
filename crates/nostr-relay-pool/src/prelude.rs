@@ -9,10 +9,11 @@
 #![doc(hidden)]
 
 // External crates
+pub use async_utility::futures_util::StreamExt; // Needed for `RelayPool::stream_events_of`
 pub use nostr::prelude::*;
 pub use nostr_database::*;
 
-pub use crate::pool::*;
 // Internal modules
-pub use crate::relay::*;
+pub use crate::pool::{self, *};
+pub use crate::relay::{self, *};
 pub use crate::*;

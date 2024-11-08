@@ -2,16 +2,52 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-use std::net::SocketAddr;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostr_ffi::helper::unwrap_or_clone_arc;
+use nostr_sdk::pool;
 use uniffi::{Enum, Object};
 
-use super::RelayLimits;
-use crate::error::Result;
+use super::{RelayFilteringMode, RelayLimits};
+use crate::error::{NostrSdkError, Result};
+use crate::protocol::helper::unwrap_or_clone_arc;
+
+#[derive(Enum)]
+pub enum ConnectionMode {
+    Direct,
+    Proxy { addr: String },
+    Tor { custom_path: Option<String> },
+}
+
+impl From<pool::ConnectionMode> for ConnectionMode {
+    fn from(mode: pool::ConnectionMode) -> Self {
+        match mode {
+            pool::ConnectionMode::Direct => Self::Direct,
+            pool::ConnectionMode::Proxy(addr) => Self::Proxy {
+                addr: addr.to_string(),
+            },
+            pool::ConnectionMode::Tor { custom_path } => Self::Tor {
+                custom_path: custom_path.map(|p| p.to_string_lossy().into_owned()),
+            },
+        }
+    }
+}
+
+impl TryFrom<ConnectionMode> for pool::ConnectionMode {
+    type Error = NostrSdkError;
+
+    fn try_from(mode: ConnectionMode) -> Result<Self, Self::Error> {
+        match mode {
+            ConnectionMode::Direct => Ok(Self::Direct),
+            ConnectionMode::Proxy { addr } => Ok(Self::Proxy(addr.parse()?)),
+            ConnectionMode::Tor { custom_path } => Ok(Self::Tor {
+                custom_path: custom_path.map(PathBuf::from),
+            }),
+        }
+    }
+}
 
 /// `Relay` options
 #[derive(Clone, Object)]
@@ -43,14 +79,11 @@ impl RelayOptions {
         }
     }
 
-    /// Set proxy
-    pub fn proxy(self: Arc<Self>, proxy: Option<String>) -> Result<Self> {
+    /// Set connection mode
+    pub fn connection_mode(self: Arc<Self>, mode: ConnectionMode) -> Result<Self> {
+        let mode: pool::ConnectionMode = mode.try_into()?;
         let mut builder = unwrap_or_clone_arc(self);
-        let proxy: Option<SocketAddr> = match proxy {
-            Some(proxy) => Some(proxy.parse()?),
-            None => None,
-        };
-        builder.inner = builder.inner.proxy(proxy);
+        builder.inner = builder.inner.connection_mode(mode);
         Ok(builder)
     }
 
@@ -82,15 +115,15 @@ impl RelayOptions {
     }
 
     /// Minimum POW for received events (default: 0)
-    pub fn pow(self: Arc<Self>, diffculty: u8) -> Self {
+    pub fn pow(self: Arc<Self>, difficulty: u8) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.pow(diffculty);
+        builder.inner = builder.inner.pow(difficulty);
         builder
     }
 
     /// Update `pow` option
-    pub fn update_pow_difficulty(&self, diffculty: u8) {
-        self.inner.update_pow_difficulty(diffculty);
+    pub fn update_pow_difficulty(&self, difficulty: u8) {
+        self.inner.update_pow_difficulty(difficulty);
     }
 
     /// Enable/disable auto reconnection (default: true)
@@ -98,11 +131,6 @@ impl RelayOptions {
         let mut builder = unwrap_or_clone_arc(self);
         builder.inner = builder.inner.reconnect(reconnect);
         builder
-    }
-
-    /// Update `reconnect` option
-    pub fn update_reconnect(&self, reconnect: bool) {
-        self.inner.update_reconnect(reconnect);
     }
 
     /// Retry connection time (default: 10 sec)
@@ -114,11 +142,6 @@ impl RelayOptions {
         builder
     }
 
-    /// Set retry_sec option
-    pub fn update_retry_sec(&self, retry_sec: u64) {
-        self.inner.update_retry_sec(retry_sec);
-    }
-
     /// Automatically adjust retry seconds based on success/attempts (default: true)
     pub fn adjust_retry_sec(self: Arc<Self>, adjust_retry_sec: bool) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
@@ -126,62 +149,26 @@ impl RelayOptions {
         builder
     }
 
-    /// Set adjust_retry_sec option
-    pub fn update_adjust_retry_sec(&self, adjust_retry_sec: bool) {
-        self.inner.update_adjust_retry_sec(adjust_retry_sec);
-    }
-
     /// Set custom limits
     pub fn limits(self: Arc<Self>, limits: &RelayLimits) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.limits(**limits);
-        builder
-    }
-}
-
-#[derive(Clone, Object)]
-pub struct RelaySendOptions {
-    inner: nostr_sdk::RelaySendOptions,
-}
-
-impl Deref for RelaySendOptions {
-    type Target = nostr_sdk::RelaySendOptions;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-#[uniffi::export]
-impl RelaySendOptions {
-    /// New default `RelaySendOptions`
-    #[uniffi::constructor]
-    pub fn new() -> Self {
-        Self {
-            inner: nostr_sdk::RelaySendOptions::default(),
-        }
-    }
-
-    /// Skip wait for disconnected relay (default: true)
-    pub fn skip_disconnected(self: Arc<Self>, value: bool) -> Self {
-        let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.skip_disconnected(value);
+        builder.inner = builder.inner.limits(limits.deref().clone());
         builder
     }
 
-    /// Skip wait for confirmation that message is sent (default: false)
-    pub fn skip_send_confirmation(self: Arc<Self>, value: bool) -> Self {
-        let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.skip_send_confirmation(value);
-        builder
-    }
-
-    /// Timeout for sending event (default: 10 secs)
+    /// Set max latency (default: None)
     ///
-    /// If `None`, the default timeout will be used
-    pub fn timeout(self: Arc<Self>, timeout: Option<Duration>) -> Self {
+    /// Relay with an avg. latency greater that this value will be skipped.
+    pub fn max_avg_latency(self: Arc<Self>, max: Option<Duration>) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.timeout(timeout);
+        builder.inner = builder.inner.max_avg_latency(max);
+        builder
+    }
+
+    /// Set filtering mode (default: blacklist)
+    pub fn filtering_mode(self: Arc<Self>, mode: RelayFilteringMode) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.filtering_mode(mode.into());
         builder
     }
 }
@@ -276,39 +263,32 @@ impl SubscribeOptions {
         builder.inner = builder.inner.close_on(opts.map(|o| **o));
         builder
     }
-
-    /// Set [RelaySendOptions]
-    pub fn send_opts(self: Arc<Self>, opts: &RelaySendOptions) -> Self {
-        let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.send_opts(**opts);
-        builder
-    }
 }
 
 #[derive(Enum)]
-pub enum NegentropyDirection {
+pub enum SyncDirection {
     Up,
     Down,
     Both,
 }
 
-impl From<NegentropyDirection> for nostr_sdk::NegentropyDirection {
-    fn from(value: NegentropyDirection) -> Self {
+impl From<SyncDirection> for nostr_sdk::SyncDirection {
+    fn from(value: SyncDirection) -> Self {
         match value {
-            NegentropyDirection::Up => Self::Up,
-            NegentropyDirection::Down => Self::Down,
-            NegentropyDirection::Both => Self::Both,
+            SyncDirection::Up => Self::Up,
+            SyncDirection::Down => Self::Down,
+            SyncDirection::Both => Self::Both,
         }
     }
 }
 
 #[derive(Clone, Object)]
-pub struct NegentropyOptions {
-    inner: nostr_sdk::NegentropyOptions,
+pub struct SyncOptions {
+    inner: nostr_sdk::SyncOptions,
 }
 
-impl Deref for NegentropyOptions {
-    type Target = nostr_sdk::NegentropyOptions;
+impl Deref for SyncOptions {
+    type Target = nostr_sdk::SyncOptions;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -316,12 +296,12 @@ impl Deref for NegentropyOptions {
 }
 
 #[uniffi::export]
-impl NegentropyOptions {
+impl SyncOptions {
     /// New default options
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
-            inner: nostr_sdk::NegentropyOptions::new(),
+            inner: nostr_sdk::SyncOptions::new(),
         }
     }
 
@@ -332,10 +312,20 @@ impl NegentropyOptions {
         builder
     }
 
-    /// Negentropy Sync direction (default: down)
-    pub fn direction(self: Arc<Self>, direction: NegentropyDirection) -> Self {
+    /// Sync Sync direction (default: down)
+    pub fn direction(self: Arc<Self>, direction: SyncDirection) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
         builder.inner = builder.inner.direction(direction.into());
+        builder
+    }
+
+    /// Dry run
+    ///
+    /// Just check what event are missing: execute reconciliation but WITHOUT
+    /// getting/sending full events.
+    pub fn dry_run(self: Arc<Self>) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.dry_run();
         builder
     }
 }

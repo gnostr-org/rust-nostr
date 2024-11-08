@@ -6,99 +6,111 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![warn(clippy::large_futures)]
 #![warn(rustdoc::bare_urls)]
-#![allow(unknown_lints)]
+#![allow(unknown_lints)] // TODO: remove when MSRV >= 1.72.0, required for `clippy::arc_with_non_send_sync`
 #![allow(clippy::arc_with_non_send_sync)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub extern crate nostr;
 pub extern crate nostr_zapper as zapper;
 
+use async_trait::async_trait;
 use async_utility::time;
-use nostr::nips::nip47::{
-    GetBalanceResponseResult, GetInfoResponseResult, ListTransactionsRequestParams,
-    LookupInvoiceRequestParams, LookupInvoiceResponseResult, MakeInvoiceRequestParams,
-    MakeInvoiceResponseResult, NostrWalletConnectURI, PayInvoiceRequestParams,
-    PayInvoiceResponseResult, PayKeysendRequestParams, PayKeysendResponseResult, Request, Response,
-};
-use nostr::{Filter, Kind, SubscriptionId};
-use nostr_relay_pool::{
-    FilterOptions, Relay, RelayNotification, RelaySendOptions, SubscribeAutoCloseOptions,
-    SubscribeOptions,
-};
-use nostr_zapper::{async_trait, NostrZapper, ZapperBackend};
+use nostr::nips::nip47::{Request, Response};
+use nostr_relay_pool::prelude::*;
+use nostr_zapper::prelude::*;
 
 pub mod error;
 pub mod options;
 pub mod prelude;
 
+#[doc(hidden)]
 pub use self::error::Error;
+#[doc(hidden)]
 pub use self::options::NostrWalletConnectOptions;
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+const ID: &str = "nwc";
 
 /// Nostr Wallet Connect client
 #[derive(Debug, Clone)]
 pub struct NWC {
     uri: NostrWalletConnectURI,
     relay: Relay,
+    opts: NostrWalletConnectOptions,
+    /// Is NWC client initialized?
+    initialized: Arc<AtomicBool>,
 }
 
 impl NWC {
     /// Compose new [NWC] client
-    pub async fn new(uri: NostrWalletConnectURI) -> Result<Self, Error> {
-        Self::with_opts(uri, NostrWalletConnectOptions::default()).await
+    #[inline]
+    pub fn new(uri: NostrWalletConnectURI) -> Self {
+        Self::with_opts(uri, NostrWalletConnectOptions::default())
     }
 
     /// Compose new [NWC] client with [NostrWalletConnectOptions]
-    pub async fn with_opts(
-        uri: NostrWalletConnectURI,
-        opts: NostrWalletConnectOptions,
-    ) -> Result<Self, Error> {
-        // Compose relay
-        let relay = Relay::with_opts(uri.relay_url.clone(), opts.relay);
-        relay.connect(Some(Duration::from_secs(10))).await;
+    pub fn with_opts(uri: NostrWalletConnectURI, opts: NostrWalletConnectOptions) -> Self {
+        Self {
+            relay: Relay::with_opts(uri.relay_url.clone(), opts.relay.clone()),
+            uri,
+            opts,
+            initialized: Arc::new(AtomicBool::new(false)),
+        }
+    }
 
-        Ok(Self { uri, relay })
+    #[inline]
+    fn is_initialized(&self) -> bool {
+        self.initialized.load(Ordering::SeqCst)
+    }
+
+    /// Connect and subscribe
+    async fn init(&self) -> Result<(), Error> {
+        if !self.is_initialized() {
+            self.relay.connect(Some(Duration::from_secs(10))).await;
+
+            let filter = Filter::new()
+                .author(self.uri.public_key)
+                .kind(Kind::WalletConnectResponse)
+                .since(Timestamp::now());
+
+            // Subscribe
+            self.relay
+                .subscribe_with_id(
+                    SubscriptionId::new(ID),
+                    vec![filter],
+                    SubscribeOptions::default(),
+                )
+                .await?;
+
+            // Mark as initialized
+            self.initialized.store(true, Ordering::SeqCst);
+        }
+
+        Ok(())
     }
 
     async fn send_request(&self, req: Request) -> Result<Response, Error> {
+        // Initialize
+        self.init().await?;
+
         // Convert request to event
-        let event = req.to_event(&self.uri)?;
-        let event_id = event.id;
-
-        // Subscribe
-        let filter = Filter::new()
-            .author(self.uri.public_key)
-            .kind(Kind::WalletConnectResponse)
-            .event(event_id)
-            .limit(1);
-
-        let auto_close_opts = SubscribeAutoCloseOptions::default()
-            .filter(FilterOptions::WaitForEventsAfterEOSE(1))
-            .timeout(Some(TIMEOUT));
-        let subscribe_opts = SubscribeOptions::default().close_on(Some(auto_close_opts));
-
-        let id: SubscriptionId = self.relay.subscribe(vec![filter], subscribe_opts).await?;
+        let event: Event = req.to_event(&self.uri)?;
+        let event_id: EventId = event.id;
 
         let mut notifications = self.relay.notifications();
 
         // Send request
-        self.relay
-            .send_event(event, RelaySendOptions::new())
-            .await?;
+        self.relay.send_event(event).await?;
 
-        time::timeout(Some(TIMEOUT), async {
+        time::timeout(Some(self.opts.timeout), async {
             while let Ok(notification) = notifications.recv().await {
-                if let RelayNotification::Event {
-                    subscription_id,
-                    event,
-                } = notification
-                {
-                    if subscription_id == id
-                        && event.kind() == Kind::WalletConnectResponse
-                        && event.event_ids().next().copied() == Some(event_id)
+                if let RelayNotification::Event { event, .. } = notification {
+                    if event.kind == Kind::WalletConnectResponse
+                        && event.tags.event_ids().next().copied() == Some(event_id)
                     {
                         return Ok(Response::from_event(&self.uri, &event)?);
                     }
@@ -182,22 +194,25 @@ impl NWC {
     }
 
     /// Completely shutdown [NWC] client
-    pub async fn shutdown(self) -> Result<(), Error> {
-        Ok(self.relay.terminate().await?)
+    #[inline]
+    pub fn shutdown(self) -> Result<(), Error> {
+        Ok(self.relay.disconnect()?)
     }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl NostrZapper for NWC {
-    type Err = Error;
-
+    #[inline]
     fn backend(&self) -> ZapperBackend {
         ZapperBackend::NWC
     }
 
-    async fn pay(&self, invoice: String) -> Result<(), Self::Err> {
-        self.pay_invoice(invoice).await?;
+    #[inline]
+    async fn pay(&self, invoice: String) -> Result<(), ZapperError> {
+        self.pay_invoice(invoice)
+            .await
+            .map_err(ZapperError::backend)?;
         Ok(())
     }
 }

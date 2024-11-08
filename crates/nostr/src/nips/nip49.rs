@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! Encrypted Secret Key
+//! NIP49: Private Key Encryption
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/49.md>
 
@@ -27,7 +27,6 @@ use crate::{key, SecretKey};
 const SALT_SIZE: usize = 16;
 const NONCE_SIZE: usize = 24;
 const CIPHERTEXT_SIZE: usize = 48;
-const TOTAL_SIZE: usize = 1 + 1 + SALT_SIZE + NONCE_SIZE + 1 + CIPHERTEXT_SIZE; // 91
 const KEY_SIZE: usize = 32;
 
 /// NIP49 error
@@ -188,7 +187,11 @@ pub struct EncryptedSecretKey {
 }
 
 impl EncryptedSecretKey {
+    /// Encrypted Secret Key len
+    pub const LEN: usize = 1 + 1 + SALT_SIZE + NONCE_SIZE + 1 + CIPHERTEXT_SIZE; // 91;
+
     /// Encrypt [SecretKey]
+    #[inline]
     #[cfg(feature = "std")]
     pub fn new<S>(
         secret_key: &SecretKey,
@@ -252,9 +255,9 @@ impl EncryptedSecretKey {
 
     /// Parse encrypted secret key from bytes
     pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
-        if slice.len() != TOTAL_SIZE {
+        if slice.len() != Self::LEN {
             return Err(Error::InvalidLength {
-                expected: TOTAL_SIZE,
+                expected: Self::LEN,
                 found: slice.len(),
             });
         }
@@ -301,7 +304,7 @@ impl EncryptedSecretKey {
 
     /// Get encrypted secret key as bytes
     pub fn as_vec(&self) -> Vec<u8> {
-        let mut bytes: Vec<u8> = Vec::with_capacity(TOTAL_SIZE);
+        let mut bytes: Vec<u8> = Vec::with_capacity(Self::LEN);
         bytes.push(self.version as u8);
         bytes.push(self.log_n);
         bytes.extend_from_slice(&self.salt);
@@ -312,11 +315,19 @@ impl EncryptedSecretKey {
     }
 
     /// Get encrypted secret key version
+    #[inline]
     pub fn version(&self) -> Version {
         self.version
     }
 
+    /// Get encryption log_n value
+    #[inline]
+    pub fn log_n(&self) -> u8 {
+        self.log_n
+    }
+
     /// Get encrypted secret key security
+    #[inline]
     pub fn key_security(&self) -> KeySecurity {
         self.key_security
     }

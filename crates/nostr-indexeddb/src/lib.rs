@@ -4,13 +4,13 @@
 
 //! Web's IndexedDB Storage backend for Nostr SDK
 
-#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rustdoc::bare_urls)]
 #![allow(unknown_lints, clippy::arc_with_non_send_sync)]
 #![cfg_attr(not(target_arch = "wasm32"), allow(unused))]
+#![allow(clippy::mutable_key_type)] // TODO: remove when possible. Needed to suppress false positive for `BTreeSet<Event>`
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -18,26 +18,17 @@ use std::sync::Arc;
 pub extern crate nostr;
 pub extern crate nostr_database as database;
 
-#[cfg(target_arch = "wasm32")]
-use async_trait::async_trait;
+use indexed_db_futures::js_sys::JsString;
 use indexed_db_futures::request::{IdbOpenDbRequestLike, OpenDbRequest};
 use indexed_db_futures::web_sys::IdbTransactionMode;
 use indexed_db_futures::{IdbDatabase, IdbQuerySource, IdbVersionChangeEvent};
-use nostr::nips::nip01::Coordinate;
-use nostr::util::hex;
-use nostr::{Event, EventId, Filter, Timestamp, Url};
-#[cfg(target_arch = "wasm32")]
-use nostr_database::NostrDatabase;
-use nostr_database::{
-    Backend, DatabaseError, DatabaseIndexes, EventIndexResult, FlatBufferBuilder, FlatBufferDecode,
-    FlatBufferEncode, Order, TempEvent,
-};
+use nostr_database::prelude::*;
 use tokio::sync::Mutex;
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
 
 mod error;
 
-pub use self::error::IndexedDBError;
+use self::error::{into_err, IndexedDBError};
 
 const CURRENT_DB_VERSION: u32 = 2;
 const EVENTS_CF: &str = "events";
@@ -59,7 +50,7 @@ pub struct OngoingMigration {
 #[derive(Clone)]
 pub struct WebDatabase {
     db: Arc<IdbDatabase>,
-    indexes: DatabaseIndexes,
+    helper: DatabaseHelper,
     fbb: Arc<Mutex<FlatBufferBuilder<'static>>>,
 }
 
@@ -71,22 +62,49 @@ impl fmt::Debug for WebDatabase {
     }
 }
 
+unsafe impl Send for WebDatabase {}
+
+unsafe impl Sync for WebDatabase {}
+
 impl WebDatabase {
-    /// Open IndexedDB store
-    pub async fn open<S>(name: S) -> Result<Self, IndexedDBError>
+    async fn new<S>(name: S, helper: DatabaseHelper) -> Result<Self, DatabaseError>
     where
         S: AsRef<str>,
     {
         let mut this = Self {
-            db: Arc::new(IdbDatabase::open(name.as_ref())?.into_future().await?),
-            indexes: DatabaseIndexes::new(),
+            db: Arc::new(
+                IdbDatabase::open(name.as_ref())
+                    .map_err(into_err)?
+                    .into_future()
+                    .await
+                    .map_err(into_err)?,
+            ),
+            helper,
             fbb: Arc::new(Mutex::new(FlatBufferBuilder::with_capacity(70_000))),
         };
 
         this.migration().await?;
-        this.build_indexes().await?;
+        this.bulk_load().await?;
 
         Ok(this)
+    }
+
+    /// Open database with **unlimited** capacity
+    #[inline]
+    pub async fn open<S>(name: S) -> Result<Self, DatabaseError>
+    where
+        S: AsRef<str>,
+    {
+        Self::new(name, DatabaseHelper::unbounded()).await
+    }
+
+    /// Open database with **limited** capacity
+    #[inline]
+    pub async fn open_bounded<S>(name: S, max_capacity: usize) -> Result<Self, DatabaseError>
+    where
+        S: AsRef<str>,
+    {
+        Self::new(name, DatabaseHelper::bounded(max_capacity)).await
     }
 
     async fn migration(&mut self) -> Result<(), IndexedDBError> {
@@ -185,7 +203,7 @@ impl WebDatabase {
         Ok(())
     }
 
-    async fn build_indexes(&self) -> Result<(), IndexedDBError> {
+    async fn bulk_load(&self) -> Result<(), IndexedDBError> {
         tracing::debug!("Building database indexes...");
         let tx = self
             .db
@@ -195,22 +213,99 @@ impl WebDatabase {
             .get_all()?
             .await?
             .into_iter()
-            .filter_map(|v| v.as_string())
+            .filter_map(js_value_to_string)
             .filter_map(|v| {
                 let bytes = hex::decode(v).ok()?;
-                TempEvent::decode(&bytes).ok()
-            });
+                Event::decode(&bytes).ok()
+            })
+            .collect();
 
         // Build indexes
-        let to_discard: HashSet<EventId> = self.indexes.bulk_index(events.collect()).await;
+        let to_discard: HashSet<EventId> = self.helper.bulk_load(events).await;
 
         // Discard events
         for event_id in to_discard.into_iter() {
             let key = JsValue::from(event_id.to_hex());
-            store.delete(&key)?;
+            store.delete(&key)?.await?;
         }
 
         tracing::info!("Database indexes loaded");
+        Ok(())
+    }
+
+    async fn _save_event(&self, event: &Event) -> Result<bool, IndexedDBError> {
+        // Index event
+        let DatabaseEventResult {
+            to_store,
+            to_discard,
+        } = self.helper.index_event(event).await;
+
+        if to_store {
+            let tx = self
+                .db
+                .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readwrite)?;
+            let store = tx.object_store(EVENTS_CF)?;
+            let key = JsValue::from(event.id.to_hex());
+
+            // Acquire FlatBuffers Builder
+            let mut fbb = self.fbb.lock().await;
+
+            // Encode
+            let event_hex: String = hex::encode(event.encode(&mut fbb));
+
+            // Drop FlatBuffers Builder
+            drop(fbb);
+
+            // Store key-val
+            let value = JsValue::from(event_hex);
+            store.put_key_val(&key, &value)?;
+
+            // Discard events no longer needed
+            for event_id in to_discard.into_iter() {
+                let key = JsValue::from(event_id.to_hex());
+                store.delete(&key)?;
+            }
+
+            tx.await.into_result()?;
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn _delete(&self, filter: Filter) -> Result<(), IndexedDBError> {
+        let tx = self
+            .db
+            .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readwrite)?;
+        let store = tx.object_store(EVENTS_CF)?;
+
+        match self.helper.delete(filter).await {
+            Some(ids) => {
+                for id in ids.into_iter() {
+                    let key = JsValue::from(id.to_hex());
+                    store.delete(&key)?.await?;
+                }
+            }
+            None => {
+                store.clear()?.await?;
+            }
+        };
+
+        Ok(())
+    }
+
+    async fn _wipe(&self) -> Result<(), IndexedDBError> {
+        for store in ALL_STORES.iter() {
+            let tx = self
+                .db
+                .transaction_on_one_with_mode(store, IdbTransactionMode::Readwrite)?;
+            let store = tx.object_store(store)?;
+            store.clear()?.await?;
+        }
+
+        self.helper.clear().await;
+
         Ok(())
     }
 }
@@ -228,8 +323,6 @@ macro_rules! impl_nostr_database {
     ({ $($body:tt)* }) => {
         #[async_trait(?Send)]
         impl NostrDatabase for WebDatabase {
-            type Err = IndexedDBError;
-
             $($body)*
         }
     };
@@ -249,124 +342,85 @@ impl_nostr_database!({
         Backend::IndexedDB
     }
 
+    #[inline]
     #[tracing::instrument(skip_all, level = "trace")]
-    async fn save_event(&self, event: &Event) -> Result<bool, IndexedDBError> {
-        // Index event
-        let EventIndexResult {
-            to_store,
-            to_discard,
-        } = self.indexes.index_event(event).await;
-
-        if to_store {
-            // Acquire FlatBuffers Builder
-            let mut fbb = self.fbb.lock().await;
-
-            let tx = self
-                .db
-                .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readwrite)?;
-            let store = tx.object_store(EVENTS_CF)?;
-            let key = JsValue::from(event.id().to_hex());
-            let value = JsValue::from(hex::encode(event.encode(&mut fbb)));
-            store.put_key_val(&key, &value)?;
-
-            // Discard events no longer needed
-            for event_id in to_discard.into_iter() {
-                let key = JsValue::from(event_id.to_hex());
-                store.delete(&key)?;
-            }
-
-            tx.await.into_result()?;
-
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+    async fn save_event(&self, event: &Event) -> Result<bool, DatabaseError> {
+        self._save_event(event)
+            .await
+            .map_err(DatabaseError::backend)
     }
 
-    #[tracing::instrument(skip_all, level = "trace")]
-    async fn bulk_import(&self, events: BTreeSet<Event>) -> Result<(), IndexedDBError> {
-        let tx = self
-            .db
-            .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readwrite)?;
-        let store = tx.object_store(EVENTS_CF)?;
-
-        // Bulk import indexes
-        let events = self.indexes.bulk_import(events).await;
-
-        // Acquire FlatBuffers Builder
-        let mut fbb = self.fbb.lock().await;
-
-        for event in events.into_iter() {
-            let key = JsValue::from(event.id.to_hex());
-            let value = JsValue::from(hex::encode(event.encode(&mut fbb)));
-            store.put_key_val(&key, &value)?;
-        }
-
-        tx.await.into_result()?;
-
-        Ok(())
-    }
-
-    async fn has_event_already_been_saved(
-        &self,
-        event_id: &EventId,
-    ) -> Result<bool, IndexedDBError> {
-        if self.indexes.has_event_id_been_deleted(event_id).await {
-            Ok(true)
+    async fn check_id(&self, event_id: &EventId) -> Result<DatabaseEventStatus, DatabaseError> {
+        if self.helper.has_event_id_been_deleted(event_id).await {
+            Ok(DatabaseEventStatus::Deleted)
         } else {
             let tx = self
                 .db
-                .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readonly)?;
-            let store = tx.object_store(EVENTS_CF)?;
+                .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readonly)
+                .map_err(into_err)?;
+            let store = tx.object_store(EVENTS_CF).map_err(into_err)?;
             let key = JsValue::from(event_id.to_hex());
-            Ok(store.get(&key)?.await?.is_some())
+            Ok(
+                if store
+                    .get(&key)
+                    .map_err(into_err)?
+                    .await
+                    .map_err(into_err)?
+                    .is_some()
+                {
+                    DatabaseEventStatus::Saved
+                } else {
+                    DatabaseEventStatus::NotExistent
+                },
+            )
         }
-    }
-
-    async fn has_event_already_been_seen(
-        &self,
-        event_id: &EventId,
-    ) -> Result<bool, IndexedDBError> {
-        let tx = self
-            .db
-            .transaction_on_one_with_mode(EVENTS_SEEN_BY_RELAYS_CF, IdbTransactionMode::Readonly)?;
-        let store = tx.object_store(EVENTS_SEEN_BY_RELAYS_CF)?;
-        let key = JsValue::from(event_id.to_hex());
-        Ok(store.get(&key)?.await?.is_some())
-    }
-
-    async fn has_event_id_been_deleted(&self, event_id: &EventId) -> Result<bool, IndexedDBError> {
-        Ok(self.indexes.has_event_id_been_deleted(event_id).await)
     }
 
     async fn has_coordinate_been_deleted(
         &self,
         coordinate: &Coordinate,
-        timestamp: Timestamp,
-    ) -> Result<bool, IndexedDBError> {
+        timestamp: &Timestamp,
+    ) -> Result<bool, DatabaseError> {
         Ok(self
-            .indexes
+            .helper
             .has_coordinate_been_deleted(coordinate, timestamp)
             .await)
     }
 
-    async fn event_id_seen(&self, event_id: EventId, relay_url: Url) -> Result<(), IndexedDBError> {
-        let mut set: HashSet<Url> = match self.event_seen_on_relays(event_id).await? {
-            Some(set) => set,
-            None => HashSet::with_capacity(1),
-        };
+    async fn event_id_seen(&self, event_id: EventId, relay_url: Url) -> Result<(), DatabaseError> {
+        let mut set: HashSet<Url> = self
+            .event_seen_on_relays(&event_id)
+            .await?
+            .unwrap_or_else(|| HashSet::with_capacity(1));
 
         if set.insert(relay_url) {
-            // Save
-            let mut fbb = self.fbb.lock().await;
-            let tx = self.db.transaction_on_one_with_mode(
-                EVENTS_SEEN_BY_RELAYS_CF,
-                IdbTransactionMode::Readwrite,
-            )?;
-            let store = tx.object_store(EVENTS_SEEN_BY_RELAYS_CF)?;
+            let tx = self
+                .db
+                .transaction_on_one_with_mode(
+                    EVENTS_SEEN_BY_RELAYS_CF,
+                    IdbTransactionMode::Readwrite,
+                )
+                .map_err(into_err)?;
+            let store = tx
+                .object_store(EVENTS_SEEN_BY_RELAYS_CF)
+                .map_err(into_err)?;
             let key = JsValue::from(event_id.to_hex());
+
+            // Acquire FlatBuffers Builder
+            let mut fbb = self.fbb.lock().await;
+
+            // Encode
             let value = JsValue::from(hex::encode(set.encode(&mut fbb)));
-            store.put_key_val(&key, &value)?;
+
+            // Drop FlatBuffers Builder
+            drop(fbb);
+
+            // Save
+            store
+                .put_key_val(&key, &value)
+                .map_err(into_err)?
+                .await
+                .map_err(into_err)?;
         }
 
         Ok(())
@@ -374,124 +428,64 @@ impl_nostr_database!({
 
     async fn event_seen_on_relays(
         &self,
-        event_id: EventId,
-    ) -> Result<Option<HashSet<Url>>, IndexedDBError> {
+        event_id: &EventId,
+    ) -> Result<Option<HashSet<Url>>, DatabaseError> {
         let tx = self
             .db
-            .transaction_on_one_with_mode(EVENTS_SEEN_BY_RELAYS_CF, IdbTransactionMode::Readonly)?;
-        let store = tx.object_store(EVENTS_SEEN_BY_RELAYS_CF)?;
+            .transaction_on_one_with_mode(EVENTS_SEEN_BY_RELAYS_CF, IdbTransactionMode::Readonly)
+            .map_err(into_err)?;
+        let store = tx
+            .object_store(EVENTS_SEEN_BY_RELAYS_CF)
+            .map_err(into_err)?;
         let key = JsValue::from(event_id.to_hex());
-        match store.get(&key)?.await? {
-            Some(jsvalue) => {
-                let set_hex = jsvalue
-                    .as_string()
-                    .ok_or(IndexedDBError::Database(DatabaseError::NotFound))?;
+        if let Some(jsvalue) = store.get(&key).map_err(into_err)?.await.map_err(into_err)? {
+            if let Some(set_hex) = js_value_to_string(jsvalue) {
                 let bytes = hex::decode(set_hex).map_err(DatabaseError::backend)?;
-                Ok(Some(
+                return Ok(Some(
                     HashSet::decode(&bytes).map_err(DatabaseError::backend)?,
-                ))
+                ));
             }
-            None => Ok(None),
         }
+
+        Ok(None)
     }
 
+    #[inline]
     #[tracing::instrument(skip_all, level = "trace")]
-    async fn event_by_id(&self, event_id: EventId) -> Result<Event, IndexedDBError> {
-        let tx = self
-            .db
-            .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readonly)?;
-        let store = tx.object_store(EVENTS_CF)?;
-        let key = JsValue::from(event_id.to_hex());
-        match store.get(&key)?.await? {
-            Some(jsvalue) => {
-                let event_hex = jsvalue
-                    .as_string()
-                    .ok_or(IndexedDBError::Database(DatabaseError::NotFound))?;
-                let bytes = hex::decode(event_hex).map_err(DatabaseError::backend)?;
-                Ok(Event::decode(&bytes).map_err(DatabaseError::backend)?)
-            }
-            None => Err(IndexedDBError::Database(DatabaseError::NotFound)),
-        }
+    async fn event_by_id(&self, event_id: &EventId) -> Result<Option<Event>, DatabaseError> {
+        Ok(self.helper.event_by_id(event_id).await)
     }
 
-    async fn count(&self, filters: Vec<Filter>) -> Result<usize, IndexedDBError> {
-        Ok(self.indexes.count(filters).await)
+    async fn count(&self, filters: Vec<Filter>) -> Result<usize, DatabaseError> {
+        Ok(self.helper.count(filters).await)
     }
 
+    #[inline]
     #[tracing::instrument(skip_all, level = "trace")]
-    async fn query(
-        &self,
-        filters: Vec<Filter>,
-        order: Order,
-    ) -> Result<Vec<Event>, IndexedDBError> {
-        let tx = self
-            .db
-            .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readonly)?;
-        let store = tx.object_store(EVENTS_CF)?;
-
-        let ids = self.indexes.query(filters, order).await;
-        let mut events: Vec<Event> = Vec::with_capacity(ids.len());
-
-        for event_id in ids.into_iter() {
-            let key = JsValue::from(event_id.to_hex());
-            if let Some(jsvalue) = store.get(&key)?.await? {
-                let event_hex = jsvalue.as_string().ok_or(DatabaseError::NotFound)?;
-                let bytes = hex::decode(event_hex).map_err(DatabaseError::backend)?;
-                let event = Event::decode(&bytes).map_err(DatabaseError::backend)?;
-                events.push(event);
-            }
-        }
-
-        Ok(events)
-    }
-
-    async fn event_ids_by_filters(
-        &self,
-        filters: Vec<Filter>,
-        order: Order,
-    ) -> Result<Vec<EventId>, IndexedDBError> {
-        Ok(self.indexes.query(filters, order).await)
+    async fn query(&self, filters: Vec<Filter>) -> Result<Events, DatabaseError> {
+        Ok(self.helper.query(filters).await)
     }
 
     async fn negentropy_items(
         &self,
         filter: Filter,
-    ) -> Result<Vec<(EventId, Timestamp)>, IndexedDBError> {
-        Ok(self.indexes.negentropy_items(filter).await)
+    ) -> Result<Vec<(EventId, Timestamp)>, DatabaseError> {
+        Ok(self.helper.negentropy_items(filter).await)
     }
 
-    async fn delete(&self, filter: Filter) -> Result<(), IndexedDBError> {
-        let tx = self
-            .db
-            .transaction_on_one_with_mode(EVENTS_CF, IdbTransactionMode::Readwrite)?;
-        let store = tx.object_store(EVENTS_CF)?;
-
-        match self.indexes.delete(filter).await {
-            Some(ids) => {
-                for id in ids.into_iter() {
-                    let key = JsValue::from(id.to_hex());
-                    store.delete(&key)?.await?;
-                }
-            }
-            None => {
-                store.clear()?.await?;
-            }
-        };
-
-        Ok(())
+    #[inline]
+    async fn delete(&self, filter: Filter) -> Result<(), DatabaseError> {
+        self._delete(filter).await.map_err(DatabaseError::backend)
     }
 
-    async fn wipe(&self) -> Result<(), IndexedDBError> {
-        for store in ALL_STORES.iter() {
-            let tx = self
-                .db
-                .transaction_on_one_with_mode(store, IdbTransactionMode::Readwrite)?;
-            let store = tx.object_store(store)?;
-            store.clear()?.await?;
-        }
-
-        self.indexes.clear().await;
-
-        Ok(())
+    #[inline]
+    async fn wipe(&self) -> Result<(), DatabaseError> {
+        self._wipe().await.map_err(DatabaseError::backend)
     }
 });
+
+#[inline(always)]
+fn js_value_to_string(value: JsValue) -> Option<String> {
+    let s: JsString = value.dyn_into().ok()?;
+    Some(s.into())
+}

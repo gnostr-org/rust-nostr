@@ -34,14 +34,18 @@
 <div slot="title">Kotlin</div>
 <section>
 
-TODO
+```kotlin
+{{#include ../../snippets/nostr/kotlin/shared/src/main/kotlin/rust/nostr/snippets/Event.kt:json}}
+```
 
 </section>
 
 <div slot="title">Swift</div>
 <section>
 
-TODO
+```swift
+{{#include ../../snippets/nostr/swift/NostrSnippets/Sources/Event/Json.swift}}
+```
 
 </section>
 </custom-tabs>
@@ -82,14 +86,18 @@ A convenient way to compose events is by using the `EventBuilder`. It allow to c
 <div slot="title">Kotlin</div>
 <section>
 
-TODO
+```kotlin
+{{#include ../../snippets/nostr/kotlin/shared/src/main/kotlin/rust/nostr/snippets/Event.kt:builder}}
+```
 
 </section>
 
 <div slot="title">Swift</div>
 <section>
 
-TODO
+```swift
+{{#include ../../snippets/nostr/swift/NostrSnippets/Sources/Event/Builder.swift}}
+```
 
 </section>
 </custom-tabs>

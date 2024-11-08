@@ -1,20 +1,21 @@
 // Copyright (c) 2022-2023 Yuki Kishimoto
-// Copyright (c) 2023-2024 Rust Nostr Developersopers
+// Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
 use std::ops::Deref;
 use std::sync::Arc;
 
-use nostr_ffi::helper::unwrap_or_clone_arc;
 use nostr_sdk::database::DynNostrDatabase;
 use nostr_sdk::zapper::DynNostrZapper;
 use uniffi::Object;
 
 use super::zapper::NostrZapper;
-use super::{Client, ClientSdk, NostrSigner, Options};
+use super::{Client, Options};
 use crate::database::NostrDatabase;
+use crate::protocol::helper::unwrap_or_clone_arc;
+use crate::protocol::signer::{NostrSigner, NostrSignerFFI2Rust};
 
-#[derive(Clone, Object)]
+#[derive(Clone, Default, Object)]
 pub struct ClientBuilder {
     inner: nostr_sdk::ClientBuilder,
 }
@@ -28,15 +29,14 @@ impl From<nostr_sdk::ClientBuilder> for ClientBuilder {
 #[uniffi::export]
 impl ClientBuilder {
     /// New client builder
+    #[inline]
     #[uniffi::constructor]
     pub fn new() -> Self {
-        Self {
-            inner: nostr_sdk::ClientBuilder::new(),
-        }
+        Self::default()
     }
 
-    pub fn signer(self: Arc<Self>, signer: Arc<NostrSigner>) -> Self {
-        let signer: nostr_sdk::NostrSigner = signer.as_ref().deref().clone();
+    pub fn signer(self: Arc<Self>, signer: Arc<dyn NostrSigner>) -> Self {
+        let signer = NostrSignerFFI2Rust::new(signer);
         let mut builder = unwrap_or_clone_arc(self);
         builder.inner = builder.inner.signer(signer);
         builder
@@ -66,6 +66,6 @@ impl ClientBuilder {
     /// Build [`Client`]
     pub fn build(&self) -> Arc<Client> {
         let inner = self.inner.clone();
-        Arc::new(ClientSdk::from_builder(inner).into())
+        Arc::new(inner.build().into())
     }
 }

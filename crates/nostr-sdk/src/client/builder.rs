@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
+use nostr::signer::{IntoNostrSigner, NostrSigner};
 use nostr_database::memory::MemoryDatabase;
 use nostr_database::{DynNostrDatabase, IntoNostrDatabase};
-use nostr_signer::NostrSigner;
 #[cfg(feature = "nip57")]
 use nostr_zapper::{DynNostrZapper, IntoNostrZapper};
 
@@ -18,7 +18,7 @@ use crate::{Client, Options};
 #[derive(Debug, Clone)]
 pub struct ClientBuilder {
     /// Nostr Signer
-    pub signer: Option<NostrSigner>,
+    pub signer: Option<Arc<dyn NostrSigner>>,
     /// Nostr Zapper
     #[cfg(feature = "nip57")]
     pub zapper: Option<Arc<DynNostrZapper>>,
@@ -42,6 +42,7 @@ impl Default for ClientBuilder {
 
 impl ClientBuilder {
     /// New default client builder
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -54,19 +55,19 @@ impl ClientBuilder {
     ///
     /// // Signer with private keys
     /// let keys = Keys::generate();
-    /// let builder = ClientBuilder::new().signer(keys);
-    ///
-    /// let _client: Client = builder.build();
+    /// let client = ClientBuilder::new().signer(keys).build();
     /// ```
-    pub fn signer<S>(mut self, signer: S) -> Self
+    #[inline]
+    pub fn signer<T>(mut self, signer: T) -> Self
     where
-        S: Into<NostrSigner>,
+        T: IntoNostrSigner,
     {
-        self.signer = Some(signer.into());
+        self.signer = Some(signer.into_nostr_signer());
         self
     }
 
     /// Set zapper
+    #[inline]
     #[cfg(feature = "nip57")]
     pub fn zapper<Z>(mut self, zapper: Z) -> Self
     where
@@ -77,6 +78,7 @@ impl ClientBuilder {
     }
 
     /// Set database
+    #[inline]
     pub fn database<D>(mut self, database: D) -> Self
     where
         D: IntoNostrDatabase,
@@ -86,12 +88,14 @@ impl ClientBuilder {
     }
 
     /// Set opts
+    #[inline]
     pub fn opts(mut self, opts: Options) -> Self {
         self.opts = opts;
         self
     }
 
     /// Build [`Client`]
+    #[inline]
     pub fn build(self) -> Client {
         Client::from_builder(self)
     }

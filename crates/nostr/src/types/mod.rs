@@ -4,12 +4,19 @@
 
 //! Types
 
+#![allow(unknown_lints)]
+#![allow(ambiguous_glob_reexports)]
+
 pub mod contact;
+pub mod filter;
+pub mod image;
 pub mod metadata;
 pub mod time;
 pub mod url;
 
-pub use self::contact::Contact;
-pub use self::metadata::Metadata;
-pub use self::time::Timestamp;
-pub use self::url::{TryIntoUrl, UncheckedUrl, Url};
+pub use self::contact::*;
+pub use self::filter::*;
+pub use self::image::*;
+pub use self::metadata::*;
+pub use self::time::*;
+pub use self::url::*;

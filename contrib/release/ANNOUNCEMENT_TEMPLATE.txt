@@ -1,0 +1,20 @@
+## rust-nostr v<VERSION_TO_REPLACE> is out! 🦀
+
+### Summary
+
+<SUMMARY_TO_REPLACE>
+
+Full changelog: https://rust-nostr.org/changelog
+
+### Contributors
+
+Thanks to all contributors!
+
+<LIST_OF_CONTRIBUTORS_TO_REPLACE>
+
+### Links
+
+https://rust-nostr.org
+https://rust-nostr.org/donate
+
+#rustnostr #nostr #rustlang #programming #rust #python #javascript #kotlin #swift

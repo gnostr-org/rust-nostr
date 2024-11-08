@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP21
+//! NIP21: `nostr:` URI scheme
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/21.md>
 
@@ -79,11 +79,13 @@ where
     Error: From<<Self as FromBech32>::Err>,
 {
     /// Get nostr URI
+    #[inline]
     fn to_nostr_uri(&self) -> Result<String, Error> {
         Ok(format!("{SCHEME}:{}", self.to_bech32()?))
     }
 
     /// From `nostr` URI
+    #[inline]
     fn from_nostr_uri<S>(uri: S) -> Result<Self, Error>
     where
         S: AsRef<str>,
@@ -151,6 +153,7 @@ impl TryFrom<Nip19> for Nip21 {
 
 impl Nip21 {
     /// Parse NIP21 string
+    #[inline]
     pub fn parse<S>(uri: S) -> Result<Self, Error>
     where
         S: AsRef<str>,
@@ -163,11 +166,11 @@ impl Nip21 {
     /// Serialize to NIP21 nostr URI
     pub fn to_nostr_uri(&self) -> Result<String, Error> {
         match self {
-            Self::Pubkey(val) => Ok(val.to_bech32()?),
-            Self::Profile(val) => Ok(val.to_bech32()?),
-            Self::EventId(val) => Ok(val.to_bech32()?),
-            Self::Event(val) => Ok(val.to_bech32()?),
-            Self::Coordinate(val) => Ok(val.to_bech32()?),
+            Self::Pubkey(val) => Ok(val.to_nostr_uri()?),
+            Self::Profile(val) => Ok(val.to_nostr_uri()?),
+            Self::EventId(val) => Ok(val.to_nostr_uri()?),
+            Self::Event(val) => Ok(val.to_nostr_uri()?),
+            Self::Coordinate(val) => Ok(val.to_nostr_uri()?),
         }
     }
 
@@ -194,6 +197,12 @@ mod tests {
                 .unwrap();
         assert_eq!(
             pubkey.to_nostr_uri().unwrap(),
+            String::from("nostr:npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy")
+        );
+
+        let generic = Nip21::Pubkey(pubkey);
+        assert_eq!(
+            generic.to_nostr_uri().unwrap(),
             String::from("nostr:npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy")
         );
     }

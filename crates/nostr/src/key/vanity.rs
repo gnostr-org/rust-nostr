@@ -51,31 +51,29 @@ impl From<RecvError> for Error {
 }
 
 impl Keys {
+    /// check validity of prefix characters
+    fn check_prefix_chars(prefixes: &[String], valid_chars: &str) -> Result<(), Error> {
+        for prefix in prefixes.iter() {
+            for c in prefix.chars() {
+                if !valid_chars.contains(c) {
+                    return Err(Error::InvalidChar(c));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Generate new vanity public key
     pub fn vanity<S>(prefixes: Vec<S>, bech32: bool, num_cores: usize) -> Result<Self, Error>
     where
         S: Into<String>,
     {
         let prefixes: Vec<String> = prefixes.into_iter().map(|p| p.into()).collect();
-
         if bech32 {
-            for prefix in prefixes.iter() {
-                for c in prefix.chars() {
-                    if !BECH32_CHARS.contains(c) {
-                        return Err(Error::InvalidChar(c));
-                    }
-                }
-            }
+            Self::check_prefix_chars(&prefixes, BECH32_CHARS)?;
         } else {
-            for prefix in prefixes.iter() {
-                for c in prefix.chars() {
-                    if !HEX_CHARS.contains(c) {
-                        return Err(Error::InvalidChar(c));
-                    }
-                }
-            }
+            Self::check_prefix_chars(&prefixes, HEX_CHARS)?;
         }
-
         let (tx, rx) = sync_channel::<Keys>(1);
         let found = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::with_capacity(num_cores);
@@ -91,7 +89,7 @@ impl Keys {
                         break;
                     }
 
-                    let keys = Keys::generate_without_keypair(&mut rng);
+                    let keys: Keys = Keys::generate_with_rng(&mut rng);
 
                     if bech32 {
                         let bech32_key = keys
@@ -103,16 +101,14 @@ impl Keys {
                             .any(|prefix| bech32_key[BECH32_SPAN..].starts_with(prefix))
                         {
                             tx.send(keys).expect("Unable to send on channel");
-                            let _ = found
-                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |_| Some(true));
+                            found.store(true, Ordering::SeqCst);
                             break;
                         }
                     } else {
                         let pubkey = keys.public_key.to_string();
                         if prefixes.iter().any(|prefix| pubkey.starts_with(prefix)) {
                             tx.send(keys).expect("Unable to send on channel");
-                            let _ = found
-                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |_| Some(true));
+                            found.store(true, Ordering::SeqCst);
                             break;
                         }
                     }

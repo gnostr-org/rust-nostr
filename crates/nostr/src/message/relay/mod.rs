@@ -18,6 +18,78 @@ pub use self::raw::RawRelayMessage;
 use super::MessageHandleError;
 use crate::{Event, EventId, JsonUtil, SubscriptionId};
 
+/// Machine-readable prefixes for `OK` and `CLOSED` relay messages
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MachineReadablePrefix {
+    /// Duplicate
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
+    Duplicate,
+    /// POW
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
+    Pow,
+    /// Blocked
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
+    Blocked,
+    /// Rate limited
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
+    RateLimited,
+    /// Invalid
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
+    Invalid,
+    /// Error
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
+    Error,
+    /// Authentication required
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/42.md>
+    AuthRequired,
+    /// Restricted
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/42.md>
+    Restricted,
+}
+
+impl fmt::Display for MachineReadablePrefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Duplicate => write!(f, "duplicate"),
+            Self::Pow => write!(f, "pow"),
+            Self::Blocked => write!(f, "blocked"),
+            Self::RateLimited => write!(f, "rate-limited"),
+            Self::Invalid => write!(f, "invalid"),
+            Self::Error => write!(f, "error"),
+            Self::AuthRequired => write!(f, "auth-required"),
+            Self::Restricted => write!(f, "restricted"),
+        }
+    }
+}
+
+impl MachineReadablePrefix {
+    /// Parse machine-readable prefix
+    pub fn parse<S>(message: S) -> Option<Self>
+    where
+        S: AsRef<str>,
+    {
+        match message.as_ref() {
+            m if m.starts_with("duplicate:") => Some(Self::Duplicate),
+            m if m.starts_with("pow:") => Some(Self::Pow),
+            m if m.starts_with("blocked:") => Some(Self::Blocked),
+            m if m.starts_with("rate-limited:") => Some(Self::RateLimited),
+            m if m.starts_with("invalid:") => Some(Self::Invalid),
+            m if m.starts_with("error:") => Some(Self::Error),
+            m if m.starts_with("auth-required:") => Some(Self::AuthRequired),
+            m if m.starts_with("restricted:") => Some(Self::Restricted),
+            _ => None,
+        }
+    }
+}
+
 /// Negentropy error code
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NegentropyErrorCode {
@@ -85,14 +157,18 @@ impl<'de> Deserialize<'de> for NegentropyErrorCode {
 /// Messages sent by relays, received by clients
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RelayMessage {
-    /// `["EVENT", <subscription_id>, <event JSON>]` (NIP01)
+    /// `["EVENT", <subscription_id>, <event JSON>]`
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
     Event {
         /// Subscription ID
         subscription_id: SubscriptionId,
         /// Event
         event: Box<Event>,
     },
-    /// `["OK", <event_id>, <true|false>, <message>]` (NIP01)
+    /// `["OK", <event_id>, <true|false>, <message>]`
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
     Ok {
         /// Event ID
         event_id: EventId,
@@ -101,26 +177,36 @@ pub enum RelayMessage {
         /// Message
         message: String,
     },
-    /// `["EOSE", <subscription_id>]` (NIP01)
+    /// `["EOSE", <subscription_id>]`
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
     EndOfStoredEvents(SubscriptionId),
-    /// ["NOTICE", \<message\>] (NIP01)
+    /// `["NOTICE", <message>]`
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
     Notice {
         /// Message
         message: String,
     },
-    /// `["CLOSED", <subscription_id>, <message>]` (NIP01)
+    /// `["CLOSED", <subscription_id>, <message>]`
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
     Closed {
         /// Subscription ID
         subscription_id: SubscriptionId,
         /// Message
         message: String,
     },
-    /// `["AUTH", <challenge-string>]` (NIP42)
+    /// `["AUTH", <challenge-string>]`
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/42.md>
     Auth {
         /// Challenge
         challenge: String,
     },
-    /// `["COUNT", <subscription_id>, {"count": <integer>}]` (NIP45)
+    /// `["COUNT", <subscription_id>, {"count": <integer>}]`
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/45.md>
     Count {
         /// Subscription ID
         subscription_id: SubscriptionId,
@@ -165,6 +251,7 @@ impl<'de> Deserialize<'de> for RelayMessage {
 
 impl RelayMessage {
     /// Create `EVENT` message
+    #[inline]
     pub fn event(subscription_id: SubscriptionId, event: Event) -> Self {
         Self::Event {
             subscription_id,
@@ -173,6 +260,7 @@ impl RelayMessage {
     }
 
     /// Create `NOTICE` message
+    #[inline]
     pub fn notice<S>(message: S) -> Self
     where
         S: Into<String>,
@@ -183,6 +271,7 @@ impl RelayMessage {
     }
 
     /// Create `CLOSED` message
+    #[inline]
     pub fn closed<S>(subscription_id: SubscriptionId, message: S) -> Self
     where
         S: Into<String>,
@@ -194,11 +283,13 @@ impl RelayMessage {
     }
 
     /// Create `EOSE` message
+    #[inline]
     pub fn eose(subscription_id: SubscriptionId) -> Self {
         Self::EndOfStoredEvents(subscription_id)
     }
 
     /// Create `OK` message
+    #[inline]
     pub fn ok<S>(event_id: EventId, status: bool, message: S) -> Self
     where
         S: Into<String>,
@@ -211,6 +302,7 @@ impl RelayMessage {
     }
 
     /// Create `AUTH` message
+    #[inline]
     pub fn auth<S>(challenge: S) -> Self
     where
         S: Into<String>,
@@ -221,6 +313,7 @@ impl RelayMessage {
     }
 
     /// Create  `EVENT` message
+    #[inline]
     pub fn count(subscription_id: SubscriptionId, count: usize) -> Self {
         Self::Count {
             subscription_id,
@@ -264,6 +357,7 @@ impl RelayMessage {
     }
 
     /// Deserialize [`RelayMessage`] from [`Value`]
+    #[inline]
     pub fn from_value(msg: Value) -> Result<Self, MessageHandleError> {
         let raw = RawRelayMessage::from_value(msg)?;
         RelayMessage::try_from(raw)
@@ -509,7 +603,7 @@ mod tests {
     #[test]
     fn parse_message() {
         // Got this fresh off the wire
-        pub const SAMPLE_EVENT: &'static str = r#"["EVENT", "random_string", {"id":"70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5","pubkey":"379e863e8357163b5bce5d2688dc4f1dcc2d505222fb8d74db600f30535dfdfe","created_at":1612809991,"kind":1,"tags":[],"content":"test","sig":"273a9cd5d11455590f4359500bccb7a89428262b96b3ea87a756b770964472f8c3e87f5d5e64d8d2e859a71462a3f477b554565c4f2f326cb01dd7620db71502"}]"#;
+        pub const SAMPLE_EVENT: &str = r#"["EVENT", "random_string", {"id":"70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5","pubkey":"379e863e8357163b5bce5d2688dc4f1dcc2d505222fb8d74db600f30535dfdfe","created_at":1612809991,"kind":1,"tags":[],"content":"test","sig":"273a9cd5d11455590f4359500bccb7a89428262b96b3ea87a756b770964472f8c3e87f5d5e64d8d2e859a71462a3f477b554565c4f2f326cb01dd7620db71502"}]"#;
 
         // Hand parsed version as a sanity check
         let id =
@@ -535,11 +629,34 @@ mod tests {
 
     #[test]
     fn test_raw_relay_message() {
-        pub const SAMPLE_EVENT: &'static str = r#"["EVENT", "random_string", {"id":"70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5","pubkey":"379e863e8357163b5bce5d2688dc4f1dcc2d505222fb8d74db600f30535dfdfe","created_at":1612809991,"kind":1,"tags":[],"content":"test","sig":"273a9cd5d11455590f4359500bccb7a89428262b96b3ea87a756b770964472f8c3e87f5d5e64d8d2e859a71462a3f477b554565c4f2f326cb01dd7620db71502"}]"#;
+        pub const SAMPLE_EVENT: &str = r#"["EVENT", "random_string", {"id":"70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5","pubkey":"379e863e8357163b5bce5d2688dc4f1dcc2d505222fb8d74db600f30535dfdfe","created_at":1612809991,"kind":1,"tags":[],"content":"test","sig":"273a9cd5d11455590f4359500bccb7a89428262b96b3ea87a756b770964472f8c3e87f5d5e64d8d2e859a71462a3f477b554565c4f2f326cb01dd7620db71502"}]"#;
 
         let raw = RawRelayMessage::from_json(SAMPLE_EVENT).unwrap();
         let msg = RelayMessage::try_from(raw).unwrap();
 
         assert_eq!(msg, RelayMessage::from_json(SAMPLE_EVENT).unwrap());
+    }
+}
+
+#[cfg(bench)]
+mod benches {
+    use test::{black_box, Bencher};
+
+    use super::*;
+
+    #[bench]
+    pub fn parse_ok_relay_message(bh: &mut Bencher) {
+        let json: &str = r#"["OK", "70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5", true, "pow: difficulty 25>=24"]"#;
+        bh.iter(|| {
+            black_box(RelayMessage::from_json(&json)).unwrap();
+        });
+    }
+
+    #[bench]
+    pub fn parse_event_relay_message(bh: &mut Bencher) {
+        let json: &str = r#"["EVENT", "random_string", {"id":"70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5","pubkey":"379e863e8357163b5bce5d2688dc4f1dcc2d505222fb8d74db600f30535dfdfe","created_at":1612809991,"kind":1,"tags":[],"content":"test","sig":"273a9cd5d11455590f4359500bccb7a89428262b96b3ea87a756b770964472f8c3e87f5d5e64d8d2e859a71462a3f477b554565c4f2f326cb01dd7620db71502"}]"#;
+        bh.iter(|| {
+            black_box(RelayMessage::from_json(&json)).unwrap();
+        });
     }
 }

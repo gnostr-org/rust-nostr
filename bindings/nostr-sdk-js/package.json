@@ -1,12 +1,14 @@
 {
   "name": "@rust-nostr/nostr-sdk",
-  "version": "0.12.0",
-  "description": "High level Nostr client library.",
+  "version": "0.36.0",
+  "description": "Nostr protocol implementation, Relay, RelayPool, high-level client library, NWC client and more.",
   "keywords": [
     "nostr",
     "sdk",
-    "rust",
-    "javascript"
+    "client",
+    "decentralization",
+    "censorship-resistance",
+    "social"
   ],
   "license": "MIT",
   "homepage": "https://github.com/rust-nostr/nostr",
@@ -37,6 +39,7 @@
     "pkg/nostr_sdk_js.d.ts"
   ],
   "dependencies": {
+    "pako": "^2.1.0",
     "ws": "^8.15.1"
   },
   "devDependencies": {
@@ -44,10 +47,5 @@
   },
   "engines": {
     "node": ">= 10"
-  },
-  "scripts": {
-    "build": "WASM_PACK_ARGS=--release ./scripts/build.sh",
-    "build:dev": "WASM_PACK_ARGS=--dev ./scripts/build.sh",
-    "package": "npm run build && npm pack"
   }
 }

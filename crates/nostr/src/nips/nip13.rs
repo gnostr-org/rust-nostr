@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP13
+//! NIP13: Proof of Work
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/13.md>
 
@@ -16,7 +16,7 @@ pub fn get_leading_zero_bits<T>(h: T) -> u8
 where
     T: AsRef<[u8]>,
 {
-    let mut res: u8 = 0_u8;
+    let mut res: u8 = 0u8;
     for b in h.as_ref().iter() {
         if *b == 0 {
             res += 8;
@@ -389,7 +389,7 @@ pub mod tests {
 
     #[test]
     fn check_find_prefixes_for_pow() {
-        assert_eq!(get_prefixes_for_difficulty(0).is_empty(), true);
+        assert!(get_prefixes_for_difficulty(0).is_empty());
 
         assert_eq!(
             get_prefixes_for_difficulty(1),

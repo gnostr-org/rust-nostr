@@ -5,8 +5,6 @@
 //! Relay Stats
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::VecDeque;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -17,186 +15,215 @@ use nostr::Timestamp;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::RwLock;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::constants::LATENCY_MIN_READS;
+
 /// Ping Stats
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
-pub(crate) struct PingStats {
-    sent_at: Arc<RwLock<Instant>>,
-    last_nonce: Arc<AtomicU64>,
-    replied: Arc<AtomicBool>,
+#[derive(Debug)]
+pub(super) struct PingStats {
+    sent_at: RwLock<Instant>,
+    last_nonce: AtomicU64,
+    replied: AtomicBool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Default for PingStats {
     fn default() -> Self {
-        Self::new()
+        Self {
+            sent_at: RwLock::new(Instant::now()),
+            last_nonce: AtomicU64::new(0),
+            replied: AtomicBool::new(false),
+        }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PingStats {
-    /// New default ping stats
-    pub fn new() -> Self {
-        Self {
-            sent_at: Arc::new(RwLock::new(Instant::now())),
-            last_nonce: Arc::new(AtomicU64::new(0)),
-            replied: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
     /// Get sent at
+    #[inline]
     pub async fn sent_at(&self) -> Instant {
         *self.sent_at.read().await
     }
 
     /// Last nonce
+    #[inline]
     pub fn last_nonce(&self) -> u64 {
         self.last_nonce.load(Ordering::SeqCst)
     }
 
     /// Replied
+    #[inline]
     pub fn replied(&self) -> bool {
         self.replied.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn reset(&self) {
+    #[inline]
+    pub(super) fn reset(&self) {
         self.set_last_nonce(0);
         self.set_replied(false);
     }
 
-    pub(crate) async fn just_sent(&self) {
+    #[inline]
+    pub(super) async fn just_sent(&self) {
         let mut sent_at = self.sent_at.write().await;
         *sent_at = Instant::now();
     }
 
-    pub(crate) fn set_last_nonce(&self, nonce: u64) {
+    #[inline]
+    pub(super) fn set_last_nonce(&self, nonce: u64) {
         self.last_nonce.store(nonce, Ordering::SeqCst)
     }
 
-    pub(crate) fn set_replied(&self, replied: bool) {
+    #[inline]
+    pub(super) fn set_replied(&self, replied: bool) {
         self.replied.store(replied, Ordering::SeqCst);
     }
 }
 
-/// Relay connection stats
-#[derive(Debug, Clone)]
-pub struct RelayConnectionStats {
-    attempts: Arc<AtomicUsize>,
-    success: Arc<AtomicUsize>,
-    bytes_sent: Arc<AtomicUsize>,
-    bytes_received: Arc<AtomicUsize>,
-    connected_at: Arc<AtomicU64>,
-    first_connection_timestamp: Arc<AtomicU64>,
-    #[cfg(not(target_arch = "wasm32"))]
-    latencies: Arc<RwLock<VecDeque<Duration>>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) ping: PingStats,
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct AverageLatency {
+    /// Sum of all latencies in milliseconds
+    total: AtomicU64,
+    /// Count of latencies
+    count: AtomicU64,
 }
 
-impl Default for RelayConnectionStats {
-    fn default() -> Self {
-        Self::new()
-    }
+#[derive(Debug, Default)]
+struct InnerRelayConnectionStats {
+    attempts: AtomicUsize,
+    success: AtomicUsize,
+    bytes_sent: AtomicUsize,
+    bytes_received: AtomicUsize,
+    connected_at: AtomicU64,
+    first_connection_at: AtomicU64,
+    #[cfg(not(target_arch = "wasm32"))]
+    latency: AverageLatency,
+    #[cfg(not(target_arch = "wasm32"))]
+    ping: PingStats,
+}
+
+/// Relay connection stats
+#[derive(Debug, Clone, Default)]
+pub struct RelayConnectionStats {
+    inner: Arc<InnerRelayConnectionStats>,
 }
 
 impl RelayConnectionStats {
-    /// New connections stats
-    pub fn new() -> Self {
-        Self {
-            attempts: Arc::new(AtomicUsize::new(0)),
-            success: Arc::new(AtomicUsize::new(0)),
-            bytes_sent: Arc::new(AtomicUsize::new(0)),
-            bytes_received: Arc::new(AtomicUsize::new(0)),
-            connected_at: Arc::new(AtomicU64::new(0)),
-            first_connection_timestamp: Arc::new(AtomicU64::new(0)),
-            #[cfg(not(target_arch = "wasm32"))]
-            latencies: Arc::new(RwLock::new(VecDeque::new())),
-            #[cfg(not(target_arch = "wasm32"))]
-            ping: PingStats::default(),
-        }
-    }
-
     /// The number of times a connection has been attempted
+    #[inline]
     pub fn attempts(&self) -> usize {
-        self.attempts.load(Ordering::SeqCst)
+        self.inner.attempts.load(Ordering::SeqCst)
     }
 
     /// The number of times a connection has been successfully established
+    #[inline]
     pub fn success(&self) -> usize {
-        self.success.load(Ordering::SeqCst)
+        self.inner.success.load(Ordering::SeqCst)
     }
 
     /// Uptime
+    #[deprecated(since = "0.36.0", note = "Use `success_rate` instead")]
     pub fn uptime(&self) -> f64 {
-        let success: f64 = self.success() as f64;
-        let attempts: f64 = self.attempts() as f64;
-        if attempts != 0.0 {
-            success / attempts
+        self.success_rate()
+    }
+
+    /// Success rate
+    pub fn success_rate(&self) -> f64 {
+        let attempts: usize = self.attempts();
+        if attempts > 0 {
+            self.success() as f64 / attempts as f64
         } else {
             0.0
         }
     }
 
     /// Bytes sent
+    #[inline]
     pub fn bytes_sent(&self) -> usize {
-        self.bytes_sent.load(Ordering::SeqCst)
+        self.inner.bytes_sent.load(Ordering::SeqCst)
     }
 
     /// Bytes received
+    #[inline]
     pub fn bytes_received(&self) -> usize {
-        self.bytes_received.load(Ordering::SeqCst)
+        self.inner.bytes_received.load(Ordering::SeqCst)
     }
 
     /// Get UNIX timestamp of the last connection
+    #[inline]
     pub fn connected_at(&self) -> Timestamp {
-        Timestamp::from(self.connected_at.load(Ordering::SeqCst))
+        Timestamp::from(self.inner.connected_at.load(Ordering::SeqCst))
     }
 
     /// Get UNIX timestamp of the first connection
+    #[inline]
     pub fn first_connection_timestamp(&self) -> Timestamp {
-        Timestamp::from(self.first_connection_timestamp.load(Ordering::SeqCst))
+        Timestamp::from(self.inner.first_connection_at.load(Ordering::SeqCst))
     }
 
     /// Calculate latency
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn latency(&self) -> Option<Duration> {
-        let latencies = self.latencies.read().await;
-        let sum: Duration = latencies.iter().sum();
-        sum.checked_div(latencies.len() as u32)
+    pub fn latency(&self) -> Option<Duration> {
+        let total: u64 = self.inner.latency.total.load(Ordering::SeqCst);
+        let count: u64 = self.inner.latency.count.load(Ordering::SeqCst);
+
+        // Check number of reads
+        if count < LATENCY_MIN_READS {
+            return None;
+        }
+
+        // Calc latency
+        total.checked_div(count).map(Duration::from_millis)
     }
 
-    pub(crate) fn new_attempt(&self) {
-        self.attempts.fetch_add(1, Ordering::SeqCst);
+    #[inline]
+    pub(super) fn new_attempt(&self) {
+        self.inner.attempts.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub(crate) fn new_success(&self) {
-        self.success.fetch_add(1, Ordering::SeqCst);
+    pub(super) fn new_success(&self) {
+        self.inner.success.fetch_add(1, Ordering::SeqCst);
 
         let now: u64 = Timestamp::now().as_u64();
 
-        self.connected_at.store(now, Ordering::SeqCst);
+        self.inner.connected_at.store(now, Ordering::SeqCst);
 
         if self.first_connection_timestamp() == Timestamp::from(0) {
-            self.first_connection_timestamp.store(now, Ordering::SeqCst);
+            self.inner.first_connection_at.store(now, Ordering::SeqCst);
         }
     }
 
-    pub(crate) fn add_bytes_sent(&self, size: usize) {
-        self.bytes_sent.fetch_add(size, Ordering::SeqCst);
+    #[inline]
+    pub(super) fn add_bytes_sent(&self, size: usize) {
+        if size > 0 {
+            self.inner.bytes_sent.fetch_add(size, Ordering::SeqCst);
+        }
     }
 
-    pub(crate) fn add_bytes_received(&self, size: usize) {
+    #[inline]
+    pub(super) fn add_bytes_received(&self, size: usize) {
         if size > 0 {
-            self.bytes_received.fetch_add(size, Ordering::SeqCst);
+            self.inner.bytes_received.fetch_add(size, Ordering::SeqCst);
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn save_latency(&self, latency: Duration) {
-        let mut latencies = self.latencies.write().await;
-        if latencies.len() >= 5 {
-            latencies.pop_back();
+    pub(super) fn save_latency(&self, latency: Duration) {
+        let ms: u128 = latency.as_millis();
+        if ms <= u64::MAX as u128 {
+            self.inner
+                .latency
+                .total
+                .fetch_add(ms as u64, Ordering::SeqCst);
+            self.inner.latency.count.fetch_add(1, Ordering::SeqCst);
         }
-        latencies.push_front(latency)
+    }
+
+    #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn ping(&self) -> &PingStats {
+        &self.inner.ping
     }
 }

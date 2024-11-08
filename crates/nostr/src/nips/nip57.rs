@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP57
+//! NIP57: Lightning Zaps
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/57.md>
 
@@ -13,13 +13,13 @@ use core::fmt;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use aes::Aes256;
-use bitcoin::bech32::{self, FromBase32, ToBase32, Variant};
+use bech32::{Bech32, Hrp};
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
 #[cfg(feature = "std")]
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::{CryptoRng, RngCore};
-use bitcoin::secp256k1::{self, Secp256k1, Signing};
+use bitcoin::secp256k1::{self, Secp256k1, Signing, Verification};
 use cbc::{Decryptor, Encryptor};
 
 use super::nip01::Coordinate;
@@ -32,22 +32,24 @@ use crate::types::time::TimeSupplier;
 use crate::SECP256K1;
 use crate::{
     event, util, Event, EventBuilder, EventId, JsonUtil, Keys, Kind, PublicKey, SecretKey, Tag,
-    Timestamp, UncheckedUrl,
+    TagStandard, Timestamp, Url,
 };
 
 type Aes256CbcEnc = Encryptor<Aes256>;
 type Aes256CbcDec = Decryptor<Aes256>;
 
-const PRIVATE_ZAP_MSG_BECH32_PREFIX: &str = "pzap";
-const PRIVATE_ZAP_IV_BECH32_PREFIX: &str = "iv";
+const PRIVATE_ZAP_MSG_BECH32_PREFIX: Hrp = Hrp::parse_unchecked("pzap");
+const PRIVATE_ZAP_IV_BECH32_PREFIX: Hrp = Hrp::parse_unchecked("iv");
 
 #[allow(missing_docs)]
 #[derive(Debug)]
 pub enum Error {
+    Fmt(fmt::Error),
     Key(KeyError),
     Builder(BuilderError),
     Event(event::Error),
-    Bech32(bech32::Error),
+    Bech32Decode(bech32::DecodeError),
+    Bech32Encode(bech32::EncodeError),
     Secp256k1(secp256k1::Error),
     InvalidPrivateZapMessage,
     PrivateZapMessageNotFound,
@@ -63,10 +65,12 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Fmt(e) => write!(f, "{e}"),
             Self::Key(e) => write!(f, "{e}"),
             Self::Builder(e) => write!(f, "{e}"),
             Self::Event(e) => write!(f, "{e}"),
-            Self::Bech32(e) => write!(f, "{e}"),
+            Self::Bech32Decode(e) => write!(f, "{e}"),
+            Self::Bech32Encode(e) => write!(f, "{e}"),
             Self::Secp256k1(e) => write!(f, "{e}"),
             Self::InvalidPrivateZapMessage => write!(f, "Invalid private zap message"),
             Self::PrivateZapMessageNotFound => write!(f, "Private zap message not found"),
@@ -76,6 +80,12 @@ impl fmt::Display for Error {
                 "Wrong encryption block mode. The content must be encrypted using CBC mode!"
             ),
         }
+    }
+}
+
+impl From<fmt::Error> for Error {
+    fn from(e: fmt::Error) -> Self {
+        Self::Fmt(e)
     }
 }
 
@@ -97,9 +107,15 @@ impl From<event::Error> for Error {
     }
 }
 
-impl From<bech32::Error> for Error {
-    fn from(e: bech32::Error) -> Self {
-        Self::Bech32(e)
+impl From<bech32::DecodeError> for Error {
+    fn from(e: bech32::DecodeError) -> Self {
+        Self::Bech32Decode(e)
+    }
+}
+
+impl From<bech32::EncodeError> for Error {
+    fn from(e: bech32::EncodeError) -> Self {
+        Self::Bech32Encode(e)
     }
 }
 
@@ -126,7 +142,7 @@ pub struct ZapRequestData {
     /// Public key of the recipient
     pub public_key: PublicKey,
     /// List of relays the recipient's wallet should publish its zap receipt to
-    pub relays: Vec<UncheckedUrl>,
+    pub relays: Vec<Url>,
     /// Message
     pub message: String,
     /// Amount in `millisats` the sender intends to pay
@@ -135,7 +151,7 @@ pub struct ZapRequestData {
     pub lnurl: Option<String>,
     /// Event ID
     pub event_id: Option<EventId>,
-    /// NIP-33 event coordinate that allows tipping parameterized replaceable events such as NIP-23 long-form notes.
+    /// NIP33 event coordinate that allows tipping parameterized replaceable events such as NIP23 long-form notes.
     pub event_coordinate: Option<Coordinate>,
 }
 
@@ -143,7 +159,7 @@ impl ZapRequestData {
     /// New Zap Request Data
     pub fn new<I>(public_key: PublicKey, relays: I) -> Self
     where
-        I: IntoIterator<Item = UncheckedUrl>,
+        I: IntoIterator<Item = Url>,
     {
         Self {
             public_key,
@@ -194,7 +210,7 @@ impl ZapRequestData {
         }
     }
 
-    /// NIP-33 event coordinate that allows tipping parameterized replaceable events such as NIP-23 long-form notes.
+    /// NIP33 event coordinate that allows tipping parameterized replaceable events such as NIP23 long-form notes.
     pub fn event_coordinate(self, event_coordinate: Coordinate) -> Self {
         Self {
             event_coordinate: Some(event_coordinate),
@@ -218,7 +234,9 @@ impl From<ZapRequestData> for Vec<Tag> {
         let mut tags: Vec<Tag> = vec![Tag::public_key(public_key)];
 
         if !relays.is_empty() {
-            tags.push(Tag::Relays(relays));
+            tags.push(Tag::from_standardized_without_cell(TagStandard::Relays(
+                relays,
+            )));
         }
 
         if let Some(event_id) = event_id {
@@ -230,14 +248,16 @@ impl From<ZapRequestData> for Vec<Tag> {
         }
 
         if let Some(amount) = amount {
-            tags.push(Tag::Amount {
+            tags.push(Tag::from_standardized_without_cell(TagStandard::Amount {
                 millisats: amount,
                 bolt11: None,
-            });
+            }));
         }
 
         if let Some(lnurl) = lnurl {
-            tags.push(Tag::Lnurl(lnurl));
+            tags.push(Tag::from_standardized_without_cell(TagStandard::Lnurl(
+                lnurl,
+            )));
         }
 
         tags
@@ -250,11 +270,14 @@ pub fn anonymous_zap_request(data: ZapRequestData) -> Result<Event, Error> {
     let keys = Keys::generate();
     let message: String = data.message.clone();
     let mut tags: Vec<Tag> = data.into();
-    tags.push(Tag::Anon { msg: None });
-    Ok(EventBuilder::new(Kind::ZapRequest, message, tags).to_event(&keys)?)
+    tags.push(Tag::from_standardized_without_cell(TagStandard::Anon {
+        msg: None,
+    }));
+    Ok(EventBuilder::new(Kind::ZapRequest, message, tags).sign_with_keys(&keys)?)
 }
 
 /// Create **private** zap request
+#[inline]
 #[cfg(feature = "std")]
 pub fn private_zap_request(data: ZapRequestData, keys: &Keys) -> Result<Event, Error> {
     private_zap_request_with_ctx(&SECP256K1, &mut OsRng, &Instant::now(), data, keys)
@@ -269,7 +292,7 @@ pub fn private_zap_request_with_ctx<C, R, T>(
     keys: &Keys,
 ) -> Result<Event, Error>
 where
-    C: Signing,
+    C: Signing + Verification,
     R: RngCore + CryptoRng,
     T: TimeSupplier,
 {
@@ -277,7 +300,7 @@ where
 
     // Create encryption key
     let secret_key: SecretKey =
-        create_encryption_key(keys.secret_key()?, &data.public_key, created_at)?;
+        create_encryption_key(keys.secret_key(), &data.public_key, created_at)?;
 
     // Compose encrypted message
     let mut tags: Vec<Tag> = vec![Tag::public_key(data.public_key)];
@@ -285,17 +308,19 @@ where
         tags.push(Tag::event(event_id));
     }
     let msg: String = EventBuilder::new(Kind::ZapPrivateMessage, &data.message, tags)
-        .to_event_with_ctx(secp, rng, supplier, keys)?
+        .sign_with_ctx(secp, rng, supplier, keys)?
         .as_json();
     let msg: String = encrypt_private_zap_message(rng, &secret_key, &data.public_key, msg)?;
 
     // Compose event
     let mut tags: Vec<Tag> = data.into();
-    tags.push(Tag::Anon { msg: Some(msg) });
+    tags.push(Tag::from_standardized_without_cell(TagStandard::Anon {
+        msg: Some(msg),
+    }));
     let private_zap_keys: Keys = Keys::new_with_ctx(secp, secret_key);
     Ok(EventBuilder::new(Kind::ZapRequest, "", tags)
         .custom_created_at(created_at)
-        .to_event_with_ctx(secp, rng, supplier, &private_zap_keys)?)
+        .sign_with_ctx(secp, rng, supplier, &private_zap_keys)?)
 }
 
 /// Create NIP57 encryption key for **private** zap
@@ -327,23 +352,21 @@ where
     rng.fill_bytes(&mut iv);
 
     let cipher = Aes256CbcEnc::new(&key.into(), &iv.into());
-    let result: Vec<u8> = cipher.encrypt_padded_vec_mut::<Pkcs7>(msg.as_ref());
+    let msg: Vec<u8> = cipher.encrypt_padded_vec_mut::<Pkcs7>(msg.as_ref());
 
     // Bech32 msg
-    let data = result.to_base32();
-    let encrypted_bech32_msg =
-        bech32::encode(PRIVATE_ZAP_MSG_BECH32_PREFIX, data, Variant::Bech32)?;
+    let encrypted_bech32_msg: String =
+        bech32::encode::<Bech32>(PRIVATE_ZAP_MSG_BECH32_PREFIX, &msg)?;
 
     // Bech32 IV
-    let data = iv.to_base32();
-    let iv_bech32 = bech32::encode(PRIVATE_ZAP_IV_BECH32_PREFIX, data, Variant::Bech32)?;
+    let iv_bech32: String = bech32::encode::<Bech32>(PRIVATE_ZAP_IV_BECH32_PREFIX, &iv)?;
 
     Ok(format!("{encrypted_bech32_msg}_{iv_bech32}"))
 }
 
 fn extract_anon_tag_message(event: &Event) -> Result<&String, Error> {
-    for tag in event.iter_tags() {
-        if let Tag::Anon { msg } = tag {
+    for tag in event.tags.iter() {
+        if let Some(TagStandard::Anon { msg }) = tag.as_standardized() {
             return msg.as_ref().ok_or(Error::InvalidPrivateZapMessage);
         }
     }
@@ -358,7 +381,7 @@ pub fn decrypt_sent_private_zap_message(
 ) -> Result<Event, Error> {
     // Re-create our ephemeral encryption key
     let secret_key: SecretKey =
-        create_encryption_key(secret_key, public_key, private_zap_event.created_at())?;
+        create_encryption_key(secret_key, public_key, private_zap_event.created_at)?;
     let key: [u8; 32] = util::generate_shared_key(&secret_key, public_key);
 
     // decrypt like normal
@@ -366,12 +389,12 @@ pub fn decrypt_sent_private_zap_message(
 }
 
 /// Decrypt **private** zap message that was received by the owner of the secret key
+#[inline]
 pub fn decrypt_received_private_zap_message(
     secret_key: &SecretKey,
     private_zap_event: &Event,
 ) -> Result<Event, Error> {
     let key: [u8; 32] = util::generate_shared_key(secret_key, &private_zap_event.pubkey);
-
     decrypt_private_zap_message(key, private_zap_event)
 }
 
@@ -383,18 +406,16 @@ fn decrypt_private_zap_message(key: [u8; 32], private_zap_event: &Event) -> Resu
     let iv: &str = splitted.next().ok_or(Error::InvalidPrivateZapMessage)?;
 
     // IV
-    let (hrp, data, checksum) = bech32::decode(iv)?;
-    if hrp != PRIVATE_ZAP_IV_BECH32_PREFIX || checksum != Variant::Bech32 {
+    let (hrp, iv) = bech32::decode(iv)?;
+    if hrp != PRIVATE_ZAP_IV_BECH32_PREFIX {
         return Err(Error::WrongBech32PrefixOrVariant);
     }
-    let iv: Vec<u8> = Vec::from_base32(&data)?;
 
     // Msg
-    let (hrp, data, checksum) = bech32::decode(msg)?;
-    if hrp != PRIVATE_ZAP_MSG_BECH32_PREFIX || checksum != Variant::Bech32 {
+    let (hrp, msg) = bech32::decode(msg)?;
+    if hrp != PRIVATE_ZAP_MSG_BECH32_PREFIX {
         return Err(Error::WrongBech32PrefixOrVariant);
     }
-    let msg: Vec<u8> = Vec::from_base32(&data)?;
 
     // Decrypt
     let cipher = Aes256CbcDec::new(&key.into(), iv.as_slice().into());
@@ -416,24 +437,23 @@ mod tests {
         let alice_keys = Keys::generate();
         let bob_keys = Keys::generate();
 
-        let relays = [UncheckedUrl::from("wss://relay.damus.io")];
+        let relays = [Url::parse("wss://relay.damus.io").unwrap()];
         let msg = "Private Zap message!";
         let data = ZapRequestData::new(bob_keys.public_key(), relays).message(msg);
         let private_zap = private_zap_request(data, &alice_keys).unwrap();
 
         let private_zap_msg = decrypt_sent_private_zap_message(
-            alice_keys.secret_key().unwrap(),
+            alice_keys.secret_key(),
             &bob_keys.public_key(),
             &private_zap,
         )
         .unwrap();
 
-        assert_eq!(msg, private_zap_msg.content());
+        assert_eq!(msg, &private_zap_msg.content);
 
         let private_zap_msg =
-            decrypt_received_private_zap_message(bob_keys.secret_key().unwrap(), &private_zap)
-                .unwrap();
+            decrypt_received_private_zap_message(bob_keys.secret_key(), &private_zap).unwrap();
 
-        assert_eq!(msg, private_zap_msg.content())
+        assert_eq!(msg, &private_zap_msg.content)
     }
 }

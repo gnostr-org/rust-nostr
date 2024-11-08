@@ -6,39 +6,69 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use nostr_sdk::prelude::*;
 
+pub mod io;
 pub mod parser;
 
 #[derive(Debug, Parser)]
 #[clap(author, version, about, long_about)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: CliCommand,
+    pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum CliCommand {
-    Open,
+pub enum Command {
+    /// Open nostr shell
+    Shell {
+        #[clap(long)]
+        relays: Vec<Url>,
+        // tor: bool,
+        // proxy: Option<SocketAddr>,
+    },
+    /// Serve a local relay for test purpose
+    Serve,
+    /// Serve Nostr Connect signer
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/46.md>
+    Bunker,
 }
 
 #[derive(Debug, Parser)]
 #[command(name = "")]
-pub enum Command {
+pub enum ShellCommand {
+    /// Generate random keys
+    Generate,
+    /// Sync public key's event with specified relays (negentropy)
+    #[command(arg_required_else_help = true)]
+    Sync {
+        /// Public key
+        public_key: PublicKey,
+        /// Relays
+        #[clap(long)]
+        relays: Vec<Url>,
+        /// Direction
+        #[clap(short, long, value_enum, default_value_t = ShellSyncDirection::Down)]
+        direction: ShellSyncDirection,
+    },
     /// Query
     Query {
-        /// Kind
-        #[clap(short, long)]
-        kind: Option<Kind>,
+        /// Event ID
+        #[clap(long)]
+        id: Option<EventId>,
         /// Author
         #[clap(short, long)]
         author: Option<PublicKey>,
-        /// Identifier (`d` tag)
+        /// Kind
         #[clap(short, long)]
+        kind: Option<Kind>,
+        /// Identifier (`d` tag)
+        #[clap(long)]
         identifier: Option<String>,
         /// Full-text search
-        #[clap(short, long)]
+        #[clap(long)]
         search: Option<String>,
         /// Since
         #[clap(short, long)]
@@ -49,30 +79,28 @@ pub enum Command {
         /// Limit
         #[clap(short, long)]
         limit: Option<usize>,
-        /// Ascending order
-        #[clap(long)]
-        reverse: bool,
         /// Query only database
-        #[clap(short, long)]
+        #[clap(long)]
         database: bool,
         /// Print result
         #[clap(long)]
         print: bool,
+        /// Print result as JSON (require `print` flag!)
+        #[clap(long)]
+        json: bool,
     },
     /// Database
     #[command(arg_required_else_help = true)]
     Database {
         #[command(subcommand)]
-        command: DatabaseCommand,
+        command: ShellCommandDatabase,
     },
-    /// Developer tools
-    Dev {},
     /// Exit
     Exit,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum DatabaseCommand {
+pub enum ShellCommandDatabase {
     /// Populate database
     #[command(arg_required_else_help = true)]
     Populate {
@@ -83,5 +111,22 @@ pub enum DatabaseCommand {
     Stats,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum DevCommands {}
+#[derive(Debug, Clone, ValueEnum)]
+pub enum ShellSyncDirection {
+    /// Send events to relay
+    Up,
+    /// Get events from relay
+    Down,
+    /// Both send and get events from relay (bidirectional sync)
+    Both,
+}
+
+impl From<ShellSyncDirection> for SyncDirection {
+    fn from(value: ShellSyncDirection) -> Self {
+        match value {
+            ShellSyncDirection::Up => Self::Up,
+            ShellSyncDirection::Down => Self::Down,
+            ShellSyncDirection::Both => Self::Both,
+        }
+    }
+}

@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
       - name: Check
-        run: make check-fmt
+        run: bash contrib/scripts/check-fmt.sh check
 
   check-crates:
     name: Check crates
@@ -26,7 +26,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Check
-      run: make check-crates
+      run: bash contrib/scripts/check-crates.sh "" ci
 
   check-crates-msrv:
     name: Check crates (MSRV)
@@ -35,7 +35,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Check
-      run: make check-crates-msrv
+      run: bash contrib/scripts/check-crates.sh msrv ci
 
   check-bindings:
     name: Check bindings
@@ -44,7 +44,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Check
-      run: make check-bindings
+      run: bash contrib/scripts/check-bindings.sh
 
   check-docs:
     name: Check docs
@@ -53,7 +53,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
       - name: Check
-        run: make check-docs
+        run: bash contrib/scripts/check-docs.sh
 
   build-no-std:
     name: Build no_std
@@ -68,7 +68,9 @@ jobs:
       run: rustup default nightly
     - name: Set profile
       run: rustup set profile minimal
+    - name: Install just
+      run: cargo install just
     - name: Init
-      run: sudo apt update && make init
+      run: sudo apt update && just init
     - name: Build
-      run: make
+      run: just build

@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
-//! NIP07
+//! NIP07: `window.nostr` capability for web browsers
 //!
 //! <https://github.com/nostr-protocol/nips/blob/master/07.md>
 
@@ -10,6 +10,7 @@ use alloc::string::{String, ToString};
 use core::fmt;
 use core::str::FromStr;
 
+use async_trait::async_trait;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr::Signature;
 use js_sys::{Array, Function, Object, Promise, Reflect};
@@ -18,6 +19,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::Window;
 
 use crate::event::{self, unsigned};
+use crate::signer::{NostrSigner, SignerError};
 use crate::{key, Event, PublicKey, UnsignedEvent};
 
 /// NIP07 error
@@ -32,7 +34,7 @@ pub enum Error {
     /// Unsigned error
     Unsigned(unsigned::Error),
     /// Generic WASM error
-    Wasm(JsValue),
+    Wasm(String),
     /// Impossible to get window
     NoGlobalWindowObject,
     /// Impossible to get window
@@ -53,7 +55,7 @@ impl fmt::Display for Error {
             Self::Keys(e) => write!(f, "Keys: {e}"),
             Self::Event(e) => write!(f, "Event: {e}"),
             Self::Unsigned(e) => write!(f, "Unsigned event: {e}"),
-            Self::Wasm(e) => write!(f, "{e:?}"),
+            Self::Wasm(e) => write!(f, "{e}"),
             Self::NoGlobalWindowObject => write!(f, "No global `window` object"),
             Self::NamespaceNotFound(n) => write!(f, "`{n}` namespace not found"),
             Self::ObjectKeyNotFound(n) => write!(f, "Key `{n}` not found in object"),
@@ -87,8 +89,9 @@ impl From<unsigned::Error> for Error {
 }
 
 impl From<JsValue> for Error {
+    #[inline]
     fn from(e: JsValue) -> Self {
-        Self::Wasm(e)
+        Self::Wasm(format!("{e:?}"))
     }
 }
 
@@ -114,6 +117,7 @@ impl Nip07Signer {
     }
 
     /// Check if `window.nostr` object is available
+    #[inline]
     pub fn is_available() -> bool {
         Self::new().is_ok()
     }
@@ -130,13 +134,14 @@ impl Nip07Signer {
     }
 
     /// Get value from object key
+    #[inline]
     fn get_value_by_key(&self, obj: &Object, key: &str) -> Result<JsValue, Error> {
         Reflect::get(obj, &JsValue::from_str(key))
             .map_err(|_| Error::ObjectKeyNotFound(key.to_string()))
     }
 
     /// Get Public Key
-    pub async fn get_public_key(&self) -> Result<PublicKey, Error> {
+    async fn _get_public_key(&self) -> Result<PublicKey, Error> {
         let func: Function = self.get_func(&self.nostr_obj, "getPublicKey")?;
         let promise: Promise = Promise::resolve(&func.call0(&self.nostr_obj)?);
         let result: JsValue = JsFuture::from(promise).await?;
@@ -146,43 +151,46 @@ impl Nip07Signer {
         Ok(PublicKey::from_hex(public_key)?)
     }
 
-    /// Sign event
-    pub async fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event, Error> {
+    async fn _sign_event(&self, unsigned: UnsignedEvent) -> Result<Event, Error> {
         let func: Function = self.get_func(&self.nostr_obj, "signEvent")?;
 
         let tags: Array = unsigned
             .tags
             .iter()
             .map(|t| {
-                t.as_vec()
-                    .into_iter()
-                    .map(|v| JsValue::from_str(&v))
+                t.as_slice()
+                    .iter()
+                    .map(|v| JsValue::from_str(v))
                     .collect::<Array>()
             })
             .collect();
 
         let unsigned_obj = Object::new();
-        Reflect::set(
-            &unsigned_obj,
-            &JsValue::from_str("id"),
-            &unsigned.id.to_hex().into(),
-        )?;
+
+        if let Some(id) = unsigned.id {
+            Reflect::set(&unsigned_obj, &JsValue::from_str("id"), &id.to_hex().into())?;
+        }
+
         Reflect::set(
             &unsigned_obj,
             &JsValue::from_str("pubkey"),
             &unsigned.pubkey.to_string().into(),
         )?;
+
         Reflect::set(
             &unsigned_obj,
             &JsValue::from_str("created_at"),
             &(unsigned.created_at.as_u64() as f64).into(),
         )?;
+
         Reflect::set(
             &unsigned_obj,
             &JsValue::from_str("kind"),
-            &(unsigned.kind.as_u64() as f64).into(),
+            &(unsigned.kind.as_u16() as f64).into(),
         )?;
+
         Reflect::set(&unsigned_obj, &JsValue::from_str("tags"), &tags.into())?;
+
         Reflect::set(
             &unsigned_obj,
             &JsValue::from_str("content"),
@@ -200,16 +208,9 @@ impl Nip07Signer {
             .ok_or_else(|| Error::TypeMismatch(String::from("expected a hex string")))?;
         let sig: Signature = Signature::from_str(&sig)?;
 
-        // Add signature to unsigned event
-        let event: Event = unsigned.add_signature(sig)?;
-
-        // Verify event (both ID and signature)
-        event.verify()?;
-
-        Ok(event)
+        // Add signature
+        Ok(unsigned.add_signature(sig)?)
     }
-
-    // TODO: add `signSchnorr`
 
     // TODO: add `getRelays`
 
@@ -221,8 +222,7 @@ impl Nip07Signer {
             .map_err(|_| Error::NamespaceNotFound(String::from("nip04")))
     }
 
-    /// NIP04 encrypt
-    pub async fn nip04_encrypt<T>(&self, public_key: PublicKey, content: T) -> Result<String, Error>
+    async fn _nip04_encrypt<T>(&self, public_key: &PublicKey, content: T) -> Result<String, Error>
     where
         T: AsRef<[u8]>,
     {
@@ -232,7 +232,7 @@ impl Nip07Signer {
         let content: String = String::from_utf8_lossy(content).to_string();
         let promise: Promise = Promise::resolve(&func.call2(
             &nip04_obj,
-            &JsValue::from_str(&public_key.to_string()),
+            &JsValue::from_str(&public_key.to_hex()),
             &JsValue::from_str(&content),
         )?);
         let result: JsValue = JsFuture::from(promise).await?;
@@ -241,10 +241,9 @@ impl Nip07Signer {
             .ok_or_else(|| Error::TypeMismatch(String::from("expected a string")))
     }
 
-    /// NIP04 decrypt
-    pub async fn nip04_decrypt<S>(
+    async fn _nip04_decrypt<S>(
         &self,
-        public_key: PublicKey,
+        public_key: &PublicKey,
         ciphertext: S,
     ) -> Result<String, Error>
     where
@@ -271,8 +270,7 @@ impl Nip07Signer {
             .map_err(|_| Error::NamespaceNotFound(String::from("nip44")))
     }
 
-    /// NIP44 encrypt
-    pub async fn nip44_encrypt<T>(&self, public_key: PublicKey, content: T) -> Result<String, Error>
+    async fn _nip44_encrypt<T>(&self, public_key: &PublicKey, content: T) -> Result<String, Error>
     where
         T: AsRef<[u8]>,
     {
@@ -291,10 +289,9 @@ impl Nip07Signer {
             .ok_or_else(|| Error::TypeMismatch(String::from("expected a string")))
     }
 
-    /// NIP44 decrypt
-    pub async fn nip44_decrypt<T>(
+    async fn _nip44_decrypt<T>(
         &self,
-        public_key: PublicKey,
+        public_key: &PublicKey,
         ciphertext: T,
     ) -> Result<String, Error>
     where
@@ -306,12 +303,65 @@ impl Nip07Signer {
         let ciphertext: String = String::from_utf8_lossy(ciphertext).to_string();
         let promise: Promise = Promise::resolve(&func.call2(
             &nip44_obj,
-            &JsValue::from_str(&public_key.to_string()),
+            &JsValue::from_str(&public_key.to_hex()),
             &JsValue::from_str(&ciphertext),
         )?);
         let result: JsValue = JsFuture::from(promise).await?;
         result
             .as_string()
             .ok_or_else(|| Error::TypeMismatch(String::from("expected a string")))
+    }
+}
+
+#[async_trait(?Send)]
+impl NostrSigner for Nip07Signer {
+    async fn get_public_key(&self) -> Result<PublicKey, SignerError> {
+        self._get_public_key().await.map_err(SignerError::backend)
+    }
+
+    async fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event, SignerError> {
+        self._sign_event(unsigned)
+            .await
+            .map_err(SignerError::backend)
+    }
+
+    async fn nip04_encrypt(
+        &self,
+        public_key: &PublicKey,
+        content: &str,
+    ) -> Result<String, SignerError> {
+        self._nip04_encrypt(public_key, content)
+            .await
+            .map_err(SignerError::backend)
+    }
+
+    async fn nip04_decrypt(
+        &self,
+        public_key: &PublicKey,
+        content: &str,
+    ) -> Result<String, SignerError> {
+        self._nip04_decrypt(public_key, content)
+            .await
+            .map_err(SignerError::backend)
+    }
+
+    async fn nip44_encrypt(
+        &self,
+        public_key: &PublicKey,
+        content: &str,
+    ) -> Result<String, SignerError> {
+        self._nip44_encrypt(public_key, content)
+            .await
+            .map_err(SignerError::backend)
+    }
+
+    async fn nip44_decrypt(
+        &self,
+        public_key: &PublicKey,
+        content: &str,
+    ) -> Result<String, SignerError> {
+        self._nip44_decrypt(public_key, content)
+            .await
+            .map_err(SignerError::backend)
     }
 }

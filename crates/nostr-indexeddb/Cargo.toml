@@ -1,6 +1,6 @@
 [package]
 name = "nostr-indexeddb"
-version = "0.29.0"
+version = "0.36.0"
 edition = "2021"
 description = "Web's IndexedDB Storage backend for Nostr apps"
 authors.workspace = true
@@ -13,7 +13,7 @@ keywords = ["nostr", "database", "indexeddb"]
 
 [dependencies]
 async-trait.workspace = true
-indexed_db_futures = "0.4"
+indexed_db_futures = "0.5"
 nostr = { workspace = true, features = ["std"] }
 nostr-database = { workspace = true, features = ["flatbuf"] }
 thiserror.workspace = true

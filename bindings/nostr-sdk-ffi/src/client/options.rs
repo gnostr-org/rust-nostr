@@ -2,14 +2,18 @@
 // Copyright (c) 2023-2024 Rust Nostr Developers
 // Distributed under the MIT software license
 
+use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostr_ffi::helper::unwrap_or_clone_arc;
-use uniffi::Object;
+use nostr_sdk::client::options;
+use nostr_sdk::pool;
+use uniffi::{Enum, Object};
 
-use crate::relay::RelayLimits;
+use crate::error::Result;
+use crate::protocol::helper::unwrap_or_clone_arc;
+use crate::relay::{ConnectionMode, RelayFilteringMode, RelayLimits};
 
 #[derive(Clone, Object)]
 pub struct Options {
@@ -39,15 +43,12 @@ impl Options {
         }
     }
 
-    pub fn wait_for_send(self: Arc<Self>, wait: bool) -> Self {
+    /// Automatically start connection with relays (default: false)
+    ///
+    /// When set to `true`, there isn't the need of calling the connect methods.
+    pub fn autoconnect(self: Arc<Self>, val: bool) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.wait_for_send(wait);
-        builder
-    }
-
-    pub fn wait_for_subscription(self: Arc<Self>, wait: bool) -> Self {
-        let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.wait_for_subscription(wait);
+        builder.inner = builder.inner.autoconnect(val);
         builder
     }
 
@@ -70,12 +71,6 @@ impl Options {
         builder
     }
 
-    pub fn skip_disconnected_relays(self: Arc<Self>, skip: bool) -> Self {
-        let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.skip_disconnected_relays(skip);
-        builder
-    }
-
     pub fn timeout(self: Arc<Self>, timeout: Duration) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
         builder.inner = builder.inner.timeout(timeout);
@@ -91,16 +86,193 @@ impl Options {
         builder
     }
 
-    pub fn send_timeout(self: Arc<Self>, send_timeout: Option<Duration>) -> Self {
+    /// Auto authenticate to relays (default: true)
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/42.md>
+    pub fn automatic_authentication(self: Arc<Self>, enabled: bool) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.send_timeout(send_timeout);
+        builder.inner = builder.inner.automatic_authentication(enabled);
+        builder
+    }
+
+    /// Enable gossip model (default: false)
+    pub fn gossip(self: Arc<Self>, enabled: bool) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.gossip(enabled);
+        builder
+    }
+
+    /// Connection
+    pub fn connection(self: Arc<Self>, connection: &Connection) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.connection(connection.deref().clone());
         builder
     }
 
     /// Set custom relay limits
     pub fn relay_limits(self: Arc<Self>, limits: &RelayLimits) -> Self {
         let mut builder = unwrap_or_clone_arc(self);
-        builder.inner = builder.inner.relay_limits(**limits);
+        builder.inner = builder.inner.relay_limits(limits.deref().clone());
         builder
+    }
+
+    /// Set max latency (default: None)
+    ///
+    /// Relays with an avg. latency greater that this value will be skipped.
+    pub fn max_avg_latency(self: Arc<Self>, max: Duration) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.max_avg_latency(max);
+        builder
+    }
+
+    /// Set filtering mode (default: blacklist)
+    pub fn filtering_mode(self: Arc<Self>, mode: RelayFilteringMode) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.filtering_mode(mode.into());
+        builder
+    }
+}
+
+/// Connection target
+#[derive(Enum)]
+pub enum ConnectionTarget {
+    /// Use proxy for all relays
+    All,
+    /// Use proxy only for `.onion` relays
+    Onion,
+}
+
+impl From<ConnectionTarget> for options::ConnectionTarget {
+    fn from(value: ConnectionTarget) -> Self {
+        match value {
+            ConnectionTarget::All => Self::All,
+            ConnectionTarget::Onion => Self::Onion,
+        }
+    }
+}
+
+/// Connection
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Object)]
+#[uniffi::export(Debug, Eq, Hash)]
+pub struct Connection {
+    inner: options::Connection,
+}
+
+impl Deref for Connection {
+    type Target = options::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[uniffi::export]
+impl Connection {
+    #[uniffi::constructor]
+    pub fn new() -> Self {
+        Self {
+            inner: options::Connection::default(),
+        }
+    }
+
+    /// Set connection mode (default: direct)
+    pub fn mode(self: Arc<Self>, mode: ConnectionMode) -> Result<Self> {
+        let mode: pool::ConnectionMode = mode.try_into()?;
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.mode(mode);
+        Ok(builder)
+    }
+
+    /// Set connection target (default: all)
+    pub fn target(self: Arc<Self>, target: ConnectionTarget) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.target(target.into());
+        builder
+    }
+
+    /// Set proxy (ex. `127.0.0.1:9050`)
+    pub fn addr(self: Arc<Self>, addr: &str) -> Result<Self> {
+        let mut builder = unwrap_or_clone_arc(self);
+        let addr: SocketAddr = addr.parse()?;
+        builder.inner = builder.inner.proxy(addr);
+        Ok(builder)
+    }
+}
+
+#[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
+#[uniffi::export]
+impl Connection {
+    /// Use embedded tor client
+    pub fn embedded_tor(self: Arc<Self>) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.embedded_tor();
+        builder
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[uniffi::export]
+impl Connection {
+    /// Use embedded tor client
+    pub fn embedded_tor(self: Arc<Self>, data_path: String) -> Self {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.inner = builder.inner.embedded_tor(data_path);
+        builder
+    }
+}
+
+#[derive(Object)]
+pub struct EventSource {
+    inner: nostr_sdk::EventSource,
+}
+
+impl Deref for EventSource {
+    type Target = nostr_sdk::EventSource;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[uniffi::export]
+impl EventSource {
+    /// Database only
+    #[uniffi::constructor]
+    pub fn database() -> Self {
+        Self {
+            inner: nostr_sdk::EventSource::Database,
+        }
+    }
+
+    /// Relays only
+    #[uniffi::constructor(default(timeout = None))]
+    pub fn relays(timeout: Option<Duration>) -> Self {
+        Self {
+            inner: nostr_sdk::EventSource::relays(timeout),
+        }
+    }
+
+    /// From specific relays only
+    #[uniffi::constructor(default(timeout = None))]
+    pub fn specific_relays(urls: Vec<String>, timeout: Option<Duration>) -> Self {
+        Self {
+            inner: nostr_sdk::EventSource::specific_relays(urls, timeout),
+        }
+    }
+
+    /// Both from database and relays
+    #[uniffi::constructor(default(timeout = None))]
+    pub fn both(timeout: Option<Duration>) -> Self {
+        Self {
+            inner: nostr_sdk::EventSource::both(timeout),
+        }
+    }
+
+    /// Both from database and specific relays
+    #[uniffi::constructor(default(timeout = None))]
+    pub fn both_with_specific_relays(urls: Vec<String>, timeout: Option<Duration>) -> Self {
+        Self {
+            inner: nostr_sdk::EventSource::both_with_specific_relays(urls, timeout),
+        }
     }
 }

@@ -1,4 +1,4 @@
-test: rust python js
+test: rust python js kotlin
 
 rust:
 	cd rust && cargo build
@@ -9,4 +9,7 @@ python:
 js:
 	cd js && npm i
 	node js/index.js
+
+kotlin:
+    cd kotlin && just test
 	

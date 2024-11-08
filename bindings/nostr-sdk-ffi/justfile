@@ -1,0 +1,154 @@
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+# Check if ANDROID_NDK_HOME env is set
+[private]
+ndk-home:
+	@if [ ! -d "${ANDROID_NDK_HOME}" ] ; then \
+		echo "Error: Please, set the ANDROID_NDK_HOME env variable to point to your NDK folder" ; \
+		exit 1 ; \
+	fi
+
+# Check if ANDROID_SDK_ROOT env is set
+[private]
+sdk-root:
+	@if [ ! -d "${ANDROID_SDK_ROOT}" ] ; then \
+		echo "Error: Please, set the ANDROID_SDK_ROOT env variable to point to your SDK folder" ; \
+		exit 1 ; \
+	fi
+
+# Get toolchain targets and required binaries for compilation
+init:
+	rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
+	rustup target add aarch64-apple-darwin x86_64-apple-darwin
+	cargo install cargo-lipo
+	cargo install cbindgen
+
+[private]
+ndk: ndk-home
+    @cargo ndk --version || cargo install cargo-ndk
+
+[private]
+clean-android:
+	rm -rf ffi/android
+	rm -rf ffi/kotlin
+
+[private]
+aarch64-linux-android: ndk
+	rustup target add aarch64-linux-android
+	cargo ndk -t aarch64-linux-android -o ffi/kotlin/jniLibs build --release
+
+[private]
+armv7-linux-androideabi: ndk
+	rustup target add armv7-linux-androideabi
+	cargo ndk -t armv7-linux-androideabi -o ffi/kotlin/jniLibs build --release
+
+[private]
+i686-linux-android: ndk
+	rustup target add i686-linux-android
+	cargo ndk -t i686-linux-android -o ffi/kotlin/jniLibs build --release
+
+[private]
+x86_64-linux-android: ndk
+	rustup target add x86_64-linux-android
+	cargo ndk -t x86_64-linux-android -o ffi/kotlin/jniLibs build --release
+
+[private]
+android: aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
+kotlin: clean-android android
+	cargo run -p uniffi-bindgen generate --library ../../target/x86_64-linux-android/release/libnostr_sdk_ffi.so --language kotlin --no-format -o ffi/kotlin
+
+# Copy required modules and libs and assemble AAR
+[private]
+assemble-aar:
+    rm -rf android/lib/src/main/jniLibs
+    rm -rf android/lib/src/main/kotlin
+    cp -r ffi/kotlin/jniLibs android/lib/src/main
+    mkdir -p android/lib/src/main/kotlin/
+    cp -r ffi/kotlin/rust android/lib/src/main/kotlin/
+    cd android && ./gradlew assembleRelease
+    mkdir -p ffi/android
+    cp android/lib/build/outputs/aar/lib-release.aar ffi/android
+
+# Compile and build Android Archive (AAR)
+aar: sdk-root kotlin assemble-aar
+
+# Publish android bindings
+[confirm]
+publish-android: aar
+	cd android && ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache
+
+[private]
+ios-universal:
+    mkdir -p ../../target/ios-universal/release
+    mkdir -p ../../target/ios-universal-sim/release
+    cargo build --release --target aarch64-apple-ios
+    cargo build --release --target x86_64-apple-ios
+    cargo build --release --target aarch64-apple-ios-sim
+    lipo -create -output ../../target/ios-universal/release/libnostr_sdk_ffi.a ../../target/aarch64-apple-ios/release/libnostr_sdk_ffi.a ../../target/x86_64-apple-ios/release/libnostr_sdk_ffi.a
+    lipo -create -output ../../target/ios-universal-sim/release/libnostr_sdk_ffi.a ../../target/aarch64-apple-ios-sim/release/libnostr_sdk_ffi.a ../../target/x86_64-apple-ios/release/libnostr_sdk_ffi.a
+
+[private]
+darwin-universal:
+	mkdir -p ../../target/darwin-universal/release
+	cargo lipo --release --targets aarch64-apple-darwin
+	cargo lipo --release --targets x86_64-apple-darwin
+	lipo -create -output ../../target/darwin-universal/release/libnostr_sdk_ffi.dylib ../../target/aarch64-apple-darwin/release/libnostr_sdk_ffi.dylib ../../target/x86_64-apple-darwin/release/libnostr_sdk_ffi.dylib
+	lipo -create -output ../../target/darwin-universal/release/libnostr_sdk_ffi.a ../../target/aarch64-apple-darwin/release/libnostr_sdk_ffi.a ../../target/x86_64-apple-darwin/release/libnostr_sdk_ffi.a
+
+swift-ios: ios-universal
+    cargo run -p uniffi-bindgen generate --library ../../target/aarch64-apple-ios/release/libnostr_sdk_ffi.a -l swift -o ffi/swift-ios
+    cp ../../target/ios-universal/release/libnostr_sdk_ffi.a ffi/swift-ios
+    cd ffi/swift-ios && "swiftc" "-emit-module" "-module-name" "nostr_sdk_ffi"  "-Xcc" "-fmodule-map-file={{invocation_directory()}}/ffi/swift-ios/nostr_sdkFFI.modulemap" "-I" "."  "-L" "." "-lnostr_sdk_ffi" nostr_sdk_ffi.swift
+
+swift-darwin: darwin-universal
+	cargo run -p uniffi-bindgen generate --library ../../target/aarch64-apple-darwin/release/libnostr_sdk_ffi.a -l swift -o ffi/swift-darwin
+	cp ../../target/darwin-universal/release/libnostr_sdk_ffi.dylib ffi/swift-darwin
+	cd ffi/swift-darwin && "swiftc" "-emit-module" "-module-name" "nostr_sdk_ffi"  "-Xcc" "-fmodule-map-file={{invocation_directory()}}/ffi/swift-darwin/nostr_sdkFFI.modulemap" "-I" "."  "-L" "." "-lnostr_sdk_ffi" nostr_sdk_ffi.swift
+
+# Copy required modules and libs and assemble Swift Package
+assemble-swift-package:
+    mkdir -p swift/Sources/NostrSDK
+    cargo run -p uniffi-bindgen generate --library ../../target/aarch64-apple-ios/release/libnostr_sdk_ffi.a --no-format --language swift --out-dir swift/Sources/NostrSDK
+    mv swift/Sources/NostrSDK/nostr_sdk_ffi.swift swift/Sources/NostrSDK/NostrSDK.swift
+    cp swift/Sources/NostrSDK/*.h swift/nostr_sdkFFI.xcframework/ios-arm64/Headers
+    cp swift/Sources/NostrSDK/*.h swift/nostr_sdkFFI.xcframework/ios-arm64_x86_64-simulator/Headers
+    cp swift/Sources/NostrSDK/*.h swift/nostr_sdkFFI.xcframework/macos-arm64_x86_64/Headers
+    cp ../../target/aarch64-apple-ios/release/libnostr_sdk_ffi.a swift/nostr_sdkFFI.xcframework/ios-arm64/nostr_sdkFFI.a
+    cp ../../target/ios-universal-sim/release/libnostr_sdk_ffi.a swift/nostr_sdkFFI.xcframework/ios-arm64_x86_64-simulator/nostr_sdkFFI.a
+    cp ../../target/darwin-universal/release/libnostr_sdk_ffi.a swift/nostr_sdkFFI.xcframework/macos-arm64_x86_64/nostr_sdkFFI.a
+    rm swift/Sources/NostrSDK/*.h
+    rm swift/Sources/NostrSDK/*.modulemap
+
+# Compile and build Swift Package
+swift: ios-universal darwin-universal assemble-swift-package
+
+[linux]
+python:
+	rm -rf python/dist
+	pip install -r python/requirements.txt
+	cargo build --release
+	cargo run -p uniffi-bindgen generate --library ../../target/release/libnostr_sdk_ffi.so --language python --no-format -o python/src/nostr-sdk/
+	cp ../../target/release/libnostr_sdk_ffi.so python/src/nostr-sdk/
+	cd python && python setup.py bdist_wheel
+	pip install ./python/dist/nostr_sdk*.whl --force-reinstall
+
+[macos]
+python:
+	rm -rf python/dist
+	pip install -r python/requirements.txt
+	cargo build --release
+	cargo run -p uniffi-bindgen generate --library ../../target/release/libnostr_sdk_ffi.dylib --language python --no-format -o python/src/nostr-sdk/
+	cp ../../target/release/libnostr_sdk_ffi.dylib python/src/nostr-sdk/
+	cd python && python setup.py bdist_wheel
+	pip install ./python/dist/nostr_sdk*.whl --force-reinstall
+
+[windows]
+python:
+	pip install -r python\requirements.txt
+	cargo build --release
+	cargo run -p uniffi-bindgen generate --library ..\..\target\release\nostr_sdk_ffi.dll --language python --no-format -o python\src\nostr-sdk\
+	copy ..\..\target\release\nostr_sdk_ffi.dll python\src\nostr-sdk
+	del /F /Q python\dist\* 2>nul || exit /b 0
+	cd python && python setup.py bdist_wheel
+	FOR %%i in (.\python\dist\*.whl) DO pip install %i --force-reinstall

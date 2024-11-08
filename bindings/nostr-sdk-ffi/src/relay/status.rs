@@ -6,19 +6,17 @@ use uniffi::Enum;
 
 #[derive(Enum)]
 pub enum RelayStatus {
-    /// Relay initialized
+    /// Initialized
     Initialized,
     /// Pending
     Pending,
     /// Connecting
     Connecting,
-    /// Relay connected
+    /// Connected
     Connected,
-    /// Relay disconnected, will retry to connect again
+    /// Disconnected, will retry to connect again
     Disconnected,
-    /// Stop
-    Stopped,
-    /// Relay completely disconnected
+    /// Completely disconnected
     Terminated,
 }
 
@@ -30,7 +28,6 @@ impl From<nostr_sdk::RelayStatus> for RelayStatus {
             nostr_sdk::RelayStatus::Connecting => Self::Connecting,
             nostr_sdk::RelayStatus::Connected => Self::Connected,
             nostr_sdk::RelayStatus::Disconnected => Self::Disconnected,
-            nostr_sdk::RelayStatus::Stopped => Self::Stopped,
             nostr_sdk::RelayStatus::Terminated => Self::Terminated,
         }
     }

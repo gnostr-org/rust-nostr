@@ -15,7 +15,7 @@ use core::{fmt, iter};
 
 use bitcoin::hashes::hmac::{Hmac, HmacEngine};
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
-use bitcoin::hashes::{self, Hash, HashEngine};
+use bitcoin::hashes::{FromSliceError, Hash, HashEngine};
 #[cfg(feature = "std")]
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
@@ -38,8 +38,8 @@ const MESSAGES_KEYS_AUTH_RANGE: Range<usize> =
 /// Error
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorV2 {
-    /// Hash error
-    Hash(hashes::Error),
+    /// From slice error
+    FromSlice(FromSliceError),
     /// Error while encoding to UTF-8
     Utf8Encode(FromUtf8Error),
     /// Try from slice
@@ -62,7 +62,7 @@ impl std::error::Error for ErrorV2 {}
 impl fmt::Display for ErrorV2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Hash(e) => write!(f, "hash error {e}"),
+            Self::FromSlice(e) => write!(f, "{e}"),
             Self::Utf8Encode(e) => write!(f, "error while encoding to UTF-8: {e}"),
             Self::TryFromSlice(e) => write!(f, "try from slice error: {e}"),
             Self::HkdfLength(size) => write!(f, "invalid Length for HKDF: {size}"),
@@ -74,9 +74,9 @@ impl fmt::Display for ErrorV2 {
     }
 }
 
-impl From<hashes::Error> for ErrorV2 {
-    fn from(e: hashes::Error) -> Self {
-        Self::Hash(e)
+impl From<FromSliceError> for ErrorV2 {
+    fn from(e: FromSliceError) -> Self {
+        Self::FromSlice(e)
     }
 }
 
@@ -95,6 +95,7 @@ impl From<TryFromSliceError> for ErrorV2 {
 struct MessageKeys([u8; MESSAGE_KEYS_SIZE]);
 
 impl MessageKeys {
+    #[inline]
     pub fn from_slice(slice: &[u8]) -> Result<Self, TryFromSliceError> {
         Ok(Self(slice.try_into()?))
     }
@@ -116,7 +117,7 @@ impl MessageKeys {
 }
 
 /// NIP44 v2 Conversation Key
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ConversationKey(Hmac<Sha256Hash>);
 
 impl fmt::Debug for ConversationKey {
@@ -134,13 +135,21 @@ impl Deref for ConversationKey {
 }
 
 impl ConversationKey {
+    /// Construct conversation key from 32-byte array
+    #[inline]
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(Hmac::from_byte_array(bytes))
+    }
+
     /// Derive Conversation Key
+    #[inline]
     pub fn derive(secret_key: &SecretKey, public_key: &PublicKey) -> Self {
         let shared_key: [u8; 32] = util::generate_shared_key(secret_key, public_key);
         Self(hkdf::extract(b"nip44-v2", &shared_key))
     }
 
     /// Compose Conversation Key from bytes
+    #[inline]
     pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
         Ok(Self(
             Hmac::from_slice(slice).map_err(|e| Error::from(ErrorV2::from(e)))?,
@@ -148,6 +157,7 @@ impl ConversationKey {
     }
 
     /// Get Conversation Key as bytes
+    #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         self.deref().as_byte_array()
     }
@@ -156,6 +166,7 @@ impl ConversationKey {
 /// Encrypt with NIP44 (v2)
 ///
 /// **The result is NOT encoded in base64!**
+#[inline]
 #[cfg(feature = "std")]
 pub fn encrypt_to_bytes<T>(
     conversation_key: &ConversationKey,
@@ -170,6 +181,7 @@ where
 /// Encrypt with NIP44 (v2) using custom Rng
 ///
 /// **The result is NOT encoded in base64!**
+#[inline]
 pub fn encrypt_to_bytes_with_rng<R, T>(
     rng: &mut R,
     conversation_key: &ConversationKey,
@@ -289,6 +301,7 @@ where
     Ok(unpadded.to_vec())
 }
 
+#[inline]
 fn get_message_keys(
     conversation_key: &ConversationKey,
     nonce: &[u8],
@@ -354,7 +367,7 @@ mod tests {
     use crate::nips::nip44;
     use crate::Keys;
 
-    const JSON_VECTORS: &'static str = include_str!("nip44.vectors.json");
+    const JSON_VECTORS: &str = include_str!("nip44.vectors.json");
 
     fn val(c: u8, idx: usize) -> u8 {
         match c {
@@ -411,11 +424,11 @@ mod tests {
 
             let sec1 = {
                 let sec1hex = vector.get("sec1").unwrap().as_str().unwrap();
-                SecretKey::from_str(&sec1hex).unwrap()
+                SecretKey::from_str(sec1hex).unwrap()
             };
             let pub2 = {
                 let pub2hex = vector.get("pub2").unwrap().as_str().unwrap();
-                PublicKey::from_str(&pub2hex).unwrap()
+                PublicKey::from_str(pub2hex).unwrap()
             };
             let conversation_key: [u8; 32] = {
                 let ckeyhex = vector.get("conversation_key").unwrap().as_str().unwrap();
@@ -486,11 +499,11 @@ mod tests {
 
             let sec1 = {
                 let sec1hex = vector.get("sec1").unwrap().as_str().unwrap();
-                SecretKey::from_str(&sec1hex).unwrap()
+                SecretKey::from_str(sec1hex).unwrap()
             };
             let pub2 = {
                 let sec2hex = vector.get("sec2").unwrap().as_str().unwrap();
-                let secret_key = SecretKey::from_str(&sec2hex).unwrap();
+                let secret_key = SecretKey::from_str(sec2hex).unwrap();
                 Keys::new(secret_key).public_key()
             };
             let conversation_key: ConversationKey = {
@@ -516,7 +529,7 @@ mod tests {
             let computed_ciphertext = internal_encrypt_to_bytes_with_rng(
                 &mut OsRng,
                 &conversation_key,
-                &plaintext,
+                plaintext,
                 Some(&nonce),
             )
             .unwrap();

@@ -1,1 +1,2 @@
-nostr-protocol==0.10.0
+nostr-sdk==0.36.0
+mnemonic==0.21
